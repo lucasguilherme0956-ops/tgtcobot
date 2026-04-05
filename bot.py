@@ -20,12 +20,7 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# ─── Stats polling system (Roblox <-> Telegram) ───
-# pending_stats: list of {"username": str} waiting to be polled by Roblox
-pending_stats: list[dict] = []
-# stats_waiters: username_lower -> list of {chat_id, message_id, event}
-stats_waiters: dict[str, list[dict]] = {}
-# bot reference for sending messages from HTTP handlers
+# Bot reference for sending messages from HTTP handlers
 _bot_ref: Bot | None = None
 
 
@@ -92,10 +87,9 @@ async def api_pending(request):
     if secret != STATS_SECRET:
         return web.json_response({"requests": []})
 
-    # Drain the queue
-    global pending_stats
-    reqs = pending_stats[:]
-    pending_stats.clear()
+    import stats_queue
+    reqs = stats_queue.pending_stats[:]
+    stats_queue.pending_stats.clear()
 
     # Deduplicate by username (keep unique)
     seen = set()
@@ -124,7 +118,8 @@ async def api_stats_receive(request):
     stats = data.get("stats")
     key = username.lower()
 
-    waiters = stats_waiters.pop(key, [])
+    import stats_queue
+    waiters = stats_queue.stats_waiters.pop(key, [])
     if not waiters:
         return web.json_response({"ok": True, "delivered": 0})
 

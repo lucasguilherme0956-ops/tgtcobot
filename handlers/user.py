@@ -964,7 +964,7 @@ async def process_stats_lookup(message: Message, state: FSMContext):
 
 async def _request_roblox_stats(message: Message, username: str, lang: str):
     """Add username to pending queue and wait for Roblox to respond."""
-    import bot as bot_module
+    import stats_queue
 
     # Send "loading" message
     loading_msg = await message.answer(t("stats_loading", lang, name=username))
@@ -980,23 +980,23 @@ async def _request_roblox_stats(message: Message, username: str, lang: str):
     key = username.lower()
 
     # Add to waiters
-    if key not in bot_module.stats_waiters:
-        bot_module.stats_waiters[key] = []
-    bot_module.stats_waiters[key].append(waiter)
+    if key not in stats_queue.stats_waiters:
+        stats_queue.stats_waiters[key] = []
+    stats_queue.stats_waiters[key].append(waiter)
 
     # Add to pending queue for Roblox to poll
-    bot_module.pending_stats.append({"username": username})
+    stats_queue.pending_stats.append({"username": username})
 
     # Wait up to 15 seconds
     try:
         await asyncio.wait_for(event.wait(), timeout=15.0)
     except asyncio.TimeoutError:
         # Remove waiter if still there
-        waiters = bot_module.stats_waiters.get(key, [])
+        waiters = stats_queue.stats_waiters.get(key, [])
         if waiter in waiters:
             waiters.remove(waiter)
-        if not waiters and key in bot_module.stats_waiters:
-            del bot_module.stats_waiters[key]
+        if not waiters and key in stats_queue.stats_waiters:
+            del stats_queue.stats_waiters[key]
 
         try:
             await loading_msg.edit_text(t("stats_timeout", lang))
