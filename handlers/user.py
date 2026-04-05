@@ -918,7 +918,7 @@ async def cb_game_stats(callback: CallbackQuery, state: FSMContext):
     player = await get_player_by_telegram(callback.from_user.id)
     if player:
         await callback.answer()
-        await _request_roblox_stats(callback.message, player["roblox_username"], lang)
+        await _request_roblox_stats(callback.message, player["roblox_username"], lang, place="public")
         return
 
     # No linked account — ask for username
@@ -937,16 +937,36 @@ async def cmd_stats(message: Message, state: FSMContext):
 
     if len(args) > 1:
         username = args[1].strip()
-        await _request_roblox_stats(message, username, lang)
+        await _request_roblox_stats(message, username, lang, place="public")
         return
 
-    # No args — try linked account
     player = await get_player_by_telegram(message.from_user.id)
     if player:
-        await _request_roblox_stats(message, player["roblox_username"], lang)
+        await _request_roblox_stats(message, player["roblox_username"], lang, place="public")
         return
 
     await state.set_state(StatsLookup.waiting_username)
+    await state.update_data(place="public")
+    await message.answer(t("stats_prompt", lang), parse_mode="Markdown")
+
+
+@router.message(Command("statsprivate"))
+async def cmd_stats_private(message: Message, state: FSMContext):
+    lang = await get_user_lang(message.from_user.id)
+    args = (message.text or "").split(maxsplit=1)
+
+    if len(args) > 1:
+        username = args[1].strip()
+        await _request_roblox_stats(message, username, lang, place="private")
+        return
+
+    player = await get_player_by_telegram(message.from_user.id)
+    if player:
+        await _request_roblox_stats(message, player["roblox_username"], lang, place="private")
+        return
+
+    await state.set_state(StatsLookup.waiting_username)
+    await state.update_data(place="private")
     await message.answer(t("stats_prompt", lang), parse_mode="Markdown")
 
 
@@ -954,22 +974,22 @@ async def cmd_stats(message: Message, state: FSMContext):
 async def process_stats_lookup(message: Message, state: FSMContext):
     lang = await get_user_lang(message.from_user.id)
     username = (message.text or "").strip()
+    data = await state.get_data()
+    place = data.get("place", "public")
     await state.clear()
     if not username or len(username) > 50:
         await message.answer(t("stats_not_found", lang))
         return
 
-    await _request_roblox_stats(message, username, lang)
+    await _request_roblox_stats(message, username, lang, place=place)
 
 
-async def _request_roblox_stats(message: Message, username: str, lang: str):
+async def _request_roblox_stats(message: Message, username: str, lang: str, place: str = "public"):
     """Add username to pending queue and wait for Roblox to respond."""
     import stats_queue
 
-    # Send "loading" message
     loading_msg = await message.answer(t("stats_loading", lang, name=username))
 
-    # Create event for this waiter
     event = asyncio.Event()
     waiter = {
         "chat_id": message.chat.id,
@@ -979,19 +999,15 @@ async def _request_roblox_stats(message: Message, username: str, lang: str):
 
     key = username.lower()
 
-    # Add to waiters
     if key not in stats_queue.stats_waiters:
         stats_queue.stats_waiters[key] = []
     stats_queue.stats_waiters[key].append(waiter)
 
-    # Add to pending queue for Roblox to poll
-    stats_queue.pending_stats.append({"username": username})
+    stats_queue.pending_stats[place].append({"username": username})
 
-    # Wait up to 15 seconds
     try:
         await asyncio.wait_for(event.wait(), timeout=15.0)
     except asyncio.TimeoutError:
-        # Remove waiter if still there
         waiters = stats_queue.stats_waiters.get(key, [])
         if waiter in waiters:
             waiters.remove(waiter)

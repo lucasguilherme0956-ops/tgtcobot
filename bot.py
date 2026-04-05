@@ -88,8 +88,11 @@ async def api_pending(request):
         return web.json_response({"requests": []})
 
     import stats_queue
-    reqs = stats_queue.pending_stats[:]
-    stats_queue.pending_stats.clear()
+    place = request.query.get("place", "public")
+    if place not in ("public", "private"):
+        place = "public"
+    reqs = stats_queue.pending_stats[place][:]
+    stats_queue.pending_stats[place].clear()
 
     # Deduplicate by username (keep unique)
     seen = set()
@@ -331,7 +334,8 @@ async def main():
         BotCommand(command="start", description="Главное меню"),
         BotCommand(command="feed", description="Лента идей / Ideas Feed"),
         BotCommand(command="profile", description="Мой профиль / My profile"),
-        BotCommand(command="stats", description="Статистика игрока / Player stats"),
+        BotCommand(command="stats", description="Статистика игрока (публичный)"),
+        BotCommand(command="statsprivate", description="Статистика (приватный сервер)"),
         BotCommand(command="link", description="Привязать Roblox / Link Roblox"),
         BotCommand(command="top", description="Топ игроков / Leaderboard"),
         BotCommand(command="admin", description="Админ-панель"),
