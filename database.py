@@ -283,6 +283,15 @@ async def init_db():
             )
         """)
 
+        await conn.execute("""
+            CREATE TABLE IF NOT EXISTS stats_cache (
+                username TEXT PRIMARY KEY,
+                stats_json TEXT NOT NULL,
+                place TEXT NOT NULL DEFAULT 'public',
+                updated_at TEXT NOT NULL
+            )
+        """)
+
         # Index for fast player lookup
         try:
             await conn.execute("CREATE INDEX IF NOT EXISTS idx_players_tg ON players(telegram_id)")
@@ -1415,6 +1424,23 @@ async def add_player_match(roblox_id: int, map_name: str | None,
     return match_id
 
 
+# ─── Stats Cache ───
+
+async def save_stats_cache(username: str, stats_json: str, place: str = "public"):
+    pool = await _get_pool()
+    now = _now()
+    await pool.execute("""
+        INSERT INTO stats_cache (username, stats_json, place, updated_at)
+        VALUES ($1, $2, $3, $4)
+        ON CONFLICT (username) DO UPDATE SET stats_json=$2, place=$3, updated_at=$4
+    """, username.lower(), stats_json, place, now)
+
+
+async def get_stats_cache(username: str):
+    pool = await _get_pool()
+    return await pool.fetchrow(
+        "SELECT * FROM stats_cache WHERE username=$1", username.lower()
+    )
 async def get_player_matches(roblox_id: int, limit: int = 10) -> list[dict]:
     pool = await get_pool()
     rows = await pool.fetch(

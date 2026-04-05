@@ -121,6 +121,15 @@ async def api_stats_receive(request):
     stats = data.get("stats")
     key = username.lower()
 
+    # Cache stats in DB if we got valid data
+    if stats and not error:
+        import json
+        from database import save_stats_cache
+        try:
+            await save_stats_cache(username, json.dumps(stats))
+        except Exception as e:
+            logger.error(f"Failed to cache stats for {username}: {e}")
+
     import stats_queue
     waiters = stats_queue.stats_waiters.pop(key, [])
     if not waiters:

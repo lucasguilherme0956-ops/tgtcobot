@@ -1014,6 +1014,21 @@ async def _request_roblox_stats(message: Message, username: str, lang: str, plac
         if not waiters and key in stats_queue.stats_waiters:
             del stats_queue.stats_waiters[key]
 
+        # Fallback: try cached stats from DB
+        import json
+        from database import get_stats_cache
+        from bot import _format_roblox_stats
+        try:
+            cached = await get_stats_cache(username)
+            if cached:
+                stats = json.loads(cached["stats_json"])
+                text = _format_roblox_stats(stats)
+                text += f"\n\n⚠️ Кэш от {cached['updated_at'][:16]}"
+                await loading_msg.edit_text(text)
+                return
+        except Exception:
+            pass
+
         try:
             await loading_msg.edit_text(t("stats_timeout", lang))
         except Exception:
