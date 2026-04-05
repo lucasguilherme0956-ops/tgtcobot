@@ -173,7 +173,7 @@ def _format_roblox_stats(stats: dict) -> str:
     event_money = stats.get("eventMoney", 0)
     wins = stats.get("wins", 0)
     daily_streak = stats.get("dailyStreak", 0)
-    play_time = stats.get("playTime", 0)
+    play_time = stats.get("timePlayed", 0)  # в секундах
 
     owned_towers = stats.get("ownedTowers", [])
     selected_towers = stats.get("selectedTowers", [])
@@ -193,8 +193,8 @@ def _format_roblox_stats(stats: dict) -> str:
     # Format money with commas
     money_str = f"{money:,}"
     event_money_str = str(event_money)
-    pt_hours = play_time // 60
-    pt_mins = play_time % 60
+    pt_hours = play_time // 3600
+    pt_mins = (play_time % 3600) // 60
 
     lines = [
         f"🎮 Статистика игрока: {username}\n",
@@ -204,7 +204,7 @@ def _format_roblox_stats(stats: dict) -> str:
         f"├ Ивент монеты: {event_money_str}",
         f"├ Победы: {wins} 🏆",
         f"├ Дейли стрик: {daily_streak} дней 🔥",
-        f"└ Время в игре: {pt_hours}ч {pt_mins}м ⏰",
+        f"└ Время в игре: {pt_hours}ч {pt_mins}м ⏱️",
         "",
         f"🏰 Башни ({len(owned_towers)}):",
         ", ".join(owned_towers) if owned_towers else "нет",
