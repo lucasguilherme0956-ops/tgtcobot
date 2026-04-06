@@ -21,7 +21,7 @@ def format_roblox_stats(stats: dict) -> str:
     event_money = stats.get("eventMoney", 0)
     wins = stats.get("wins", 0)
     daily_streak = stats.get("dailyStreak", 0)
-    play_time = stats.get("timePlayed", 0)
+    play_time = int(stats.get("timePlayed", 0))  # в секундах
 
     owned_towers = stats.get("ownedTowers", [])
     selected_towers = stats.get("selectedTowers", [])

@@ -1010,7 +1010,7 @@ async def _request_roblox_stats(message: Message, username: str, lang: str, plac
 
     # Wait 5s for live Roblox response
     try:
-        await asyncio.wait_for(event.wait(), timeout=5.0)
+        await asyncio.wait_for(event.wait(), timeout=10.0)
         return  # Roblox answered, message already edited
     except asyncio.TimeoutError:
         pass
