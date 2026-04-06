@@ -1017,12 +1017,12 @@ async def _request_roblox_stats(message: Message, username: str, lang: str, plac
         # Fallback: try cached stats from DB
         import json
         from database import get_stats_cache
-        from bot import _format_roblox_stats
+        from stats_queue import format_roblox_stats
         try:
             cached = await get_stats_cache(username)
             if cached:
                 stats = json.loads(cached["stats_json"])
-                text = _format_roblox_stats(stats)
+                text = format_roblox_stats(stats)
                 text += f"\n\n⚠️ Кэш от {cached['updated_at'][:16]}"
                 await loading_msg.edit_text(text)
                 return
