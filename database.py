@@ -1770,13 +1770,19 @@ async def redeem_promo_code(code: str, telegram_id: int,
         promo["id"], telegram_id)
     if existing:
         return {"ok": False, "error": "already_redeemed"}
-    await pool.execute("""
-        INSERT INTO promo_redemptions (code_id, telegram_id, roblox_username, redeemed_at)
-        VALUES ($1, $2, $3, $4)
-    """, promo["id"], telegram_id, roblox_username, now_msk().isoformat())
-    await pool.execute(
-        "UPDATE promo_codes SET used_count = used_count + 1 WHERE id = $1",
+    # Atomic: only increment if still under limit
+    result = await pool.execute(
+        "UPDATE promo_codes SET used_count = used_count + 1 WHERE id = $1 AND used_count < max_uses",
         promo["id"])
+    if not result.endswith("1"):
+        return {"ok": False, "error": "used_up"}
+    try:
+        await pool.execute("""
+            INSERT INTO promo_redemptions (code_id, telegram_id, roblox_username, redeemed_at)
+            VALUES ($1, $2, $3, $4)
+        """, promo["id"], telegram_id, roblox_username, now_msk().isoformat())
+    except Exception:
+        return {"ok": False, "error": "already_redeemed"}
     # Queue reward for Roblox if roblox_reward_data exists and user has linked account
     roblox_queued = False
     if promo.get("roblox_reward_data"):
@@ -1888,9 +1894,12 @@ async def check_code_for_roblox(code: str, roblox_username: str) -> dict:
         if not linked or linked.lower() != roblox_username.lower():
             return {"ok": False, "error": "Code belongs to another player"}
     pool = await get_pool()
-    await pool.execute(
-        "UPDATE promo_codes SET used_count = used_count + 1 WHERE id = $1",
+    # Atomic update
+    result = await pool.execute(
+        "UPDATE promo_codes SET used_count = used_count + 1 WHERE id = $1 AND used_count < max_uses",
         promo["id"])
+    if not result.endswith("1"):
+        return {"ok": False, "error": "Code fully used"}
     import json
     reward = promo.get("roblox_reward_data")
     try:

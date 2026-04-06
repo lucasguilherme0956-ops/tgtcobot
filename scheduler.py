@@ -146,7 +146,11 @@ async def _check_giveaways():
     """Завершает розыгрыши по времени, выбирает победителей."""
     if not _bot:
         return
-    ending = await get_ending_giveaways()
+    try:
+        ending = await get_ending_giveaways()
+    except Exception as e:
+        logger.warning(f"_check_giveaways error: {e}")
+        return
     for g in ending:
         from database import count_giveaway_entries, get_pool
         entries = await count_giveaway_entries(g["id"])
@@ -174,70 +178,79 @@ async def _check_giveaways():
 
 async def _check_polls():
     """Закрывает опросы по истечении времени."""
-    expiring = await get_expiring_polls()
-    for p in expiring:
-        await close_poll(p["id"])
+    try:
+        expiring = await get_expiring_polls()
+        for p in expiring:
+            await close_poll(p["id"])
+    except Exception as e:
+        logger.warning(f"_check_polls error: {e}")
 
 
 async def _monitor_server():
     """Считает онлайн из stats_cache, логирует, алертит при даунтайме."""
     if not _bot:
         return
-    import json
-    from database import get_pool
-    from datetime import timedelta
-    pool = await get_pool()
-    cutoff = (now_msk() - timedelta(minutes=10)).isoformat()
-    rows = await pool.fetch(
-        "SELECT stats_json FROM stats_cache WHERE place = 'public' AND updated_at > $1",
-        cutoff)
-    online = 0
-    for r in rows:
-        try:
-            data = json.loads(r["stats_json"])
-            if data.get("isOnline"):
-                online += 1
-        except Exception:
-            pass
-    await log_server_status(online)
-    downtime = await get_server_downtime_minutes()
-    if downtime >= 15:
-        admin_ids = await get_all_admin_ids()
-        for aid in admin_ids:
+    try:
+        import json
+        from database import get_pool
+        from datetime import timedelta
+        pool = await get_pool()
+        cutoff = (now_msk() - timedelta(minutes=10)).isoformat()
+        rows = await pool.fetch(
+            "SELECT stats_json FROM stats_cache WHERE place = 'public' AND updated_at > $1",
+            cutoff)
+        online = 0
+        for r in rows:
             try:
-                await _bot.send_message(aid, f"🔴 **Сервер недоступен** {downtime}+ мин!",
-                                        parse_mode="Markdown")
+                data = json.loads(r["stats_json"])
+                if data.get("isOnline"):
+                    online += 1
             except Exception:
                 pass
+        await log_server_status(online)
+        downtime = await get_server_downtime_minutes()
+        if downtime >= 15:
+            admin_ids = await get_all_admin_ids()
+            for aid in admin_ids:
+                try:
+                    await _bot.send_message(aid, f"🔴 **Сервер недоступен** {downtime}+ мин!",
+                                            parse_mode="Markdown")
+                except Exception:
+                    pass
+    except Exception as e:
+        logger.warning(f"_monitor_server error: {e}")
 
 
 async def _weekly_top_broadcast():
     """Каждый понедельник: топ за неделю, рассылка подписчикам."""
     if not _bot:
         return
-    import asyncio
-    from datetime import timedelta
-    now = now_msk()
-    week_start = (now - timedelta(days=now.weekday())).strftime("%Y-%m-%d")
-    for stat in ["wins", "money", "timePlayed"]:
-        top = await compute_weekly_top(stat, 10)
-        if top:
-            await save_weekly_top(week_start, stat, top)
-    wins_top = await compute_weekly_top("wins", 10)
-    if not wins_top:
-        return
-    medals = ["🥇", "🥈", "🥉"]
-    text = f"📊 **Топ недели** (🏆 Победы):\n🗓 {week_start}\n\n"
-    for i, entry in enumerate(wins_top):
-        pos = medals[i] if i < 3 else f"{i + 1}."
-        text += f"{pos} **{entry['username']}** — {entry['value']}\n"
-    subs = await get_all_subscribers()
-    for uid in subs:
-        try:
-            await _bot.send_message(uid, text, parse_mode="Markdown")
-        except Exception:
-            pass
-        await asyncio.sleep(0.05)
+    try:
+        import asyncio
+        from datetime import timedelta
+        now = now_msk()
+        week_start = (now - timedelta(days=now.weekday())).strftime("%Y-%m-%d")
+        for stat in ["wins", "money", "timePlayed"]:
+            top = await compute_weekly_top(stat, 10)
+            if top:
+                await save_weekly_top(week_start, stat, top)
+        wins_top = await compute_weekly_top("wins", 10)
+        if not wins_top:
+            return
+        medals = ["🥇", "🥈", "🥉"]
+        text = f"📊 **Топ недели** (🏆 Победы):\n🗓 {week_start}\n\n"
+        for i, entry in enumerate(wins_top):
+            pos = medals[i] if i < 3 else f"{i + 1}."
+            text += f"{pos} **{entry['username']}** — {entry['value']}\n"
+        subs = await get_all_subscribers()
+        for uid in subs:
+            try:
+                await _bot.send_message(uid, text, parse_mode="Markdown")
+            except Exception:
+                pass
+            await asyncio.sleep(0.05)
+    except Exception as e:
+        logger.warning(f"_weekly_top_broadcast error: {e}")
 
 
 def setup_scheduler(bot) -> AsyncIOScheduler:

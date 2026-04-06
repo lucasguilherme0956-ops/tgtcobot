@@ -850,6 +850,9 @@ async def cmd_feed(message: Message, state: FSMContext):
         return
 
     tasks = await get_feed_tasks_sorted(sort="rating", limit=1, offset=0)
+    if not tasks:
+        await message.answer(t("feed_empty", lang), reply_markup=back_to_menu_kb(lang))
+        return
     task = tasks[0]
     cat_emoji = CATEGORIES.get(task["category"], "❓").split()[0]
     cat_label = CATEGORIES.get(task["category"], "❓")
