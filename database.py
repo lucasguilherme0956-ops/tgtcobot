@@ -1427,8 +1427,8 @@ async def add_player_match(roblox_id: int, map_name: str | None,
 # ─── Stats Cache ───
 
 async def save_stats_cache(username: str, stats_json: str, place: str = "public"):
-    pool = await _get_pool()
-    now = _now()
+    pool = await get_pool()
+    now = now_msk().isoformat()
     await pool.execute("""
         INSERT INTO stats_cache (username, stats_json, place, updated_at)
         VALUES ($1, $2, $3, $4)
@@ -1437,7 +1437,7 @@ async def save_stats_cache(username: str, stats_json: str, place: str = "public"
 
 
 async def get_stats_cache(username: str):
-    pool = await _get_pool()
+    pool = await get_pool()
     return await pool.fetchrow(
         "SELECT * FROM stats_cache WHERE username=$1", username.lower()
     )
