@@ -986,7 +986,10 @@ async def process_stats_lookup(message: Message, state: FSMContext):
 
 async def _request_roblox_stats(message: Message, username: str, lang: str, place: str = "public"):
     """Add username to pending queue and wait for Roblox to respond."""
+    import json
     import stats_queue
+    from database import get_stats_cache
+    from stats_queue import format_roblox_stats
 
     loading_msg = await message.answer(t("stats_loading", lang, name=username))
 
@@ -1005,48 +1008,50 @@ async def _request_roblox_stats(message: Message, username: str, lang: str, plac
 
     stats_queue.pending_stats[place].append({"username": username})
 
+    # Wait 5s for live Roblox response
     try:
-        await asyncio.wait_for(event.wait(), timeout=15.0)
+        await asyncio.wait_for(event.wait(), timeout=5.0)
+        return  # Roblox answered, message already edited
     except asyncio.TimeoutError:
-        waiters = stats_queue.stats_waiters.get(key, [])
-        if waiter in waiters:
-            waiters.remove(waiter)
-        if not waiters and key in stats_queue.stats_waiters:
-            del stats_queue.stats_waiters[key]
+        pass
 
-        # Fallback 1: try cached stats
-        import json
-        from database import get_stats_cache
-        from stats_queue import format_roblox_stats
-        try:
-            cached = await get_stats_cache(username)
-            if cached:
-                stats = json.loads(cached["stats_json"])
-                stats["isOnline"] = False
-                text = format_roblox_stats(stats)
-                text += f"\n\n⚠️ Кэш от {cached['updated_at'][:16]}"
-                await loading_msg.edit_text(text)
+    # Remove waiter
+    waiters = stats_queue.stats_waiters.get(key, [])
+    if waiter in waiters:
+        waiters.remove(waiter)
+    if not waiters and key in stats_queue.stats_waiters:
+        del stats_queue.stats_waiters[key]
+
+    # Fallback 1: stats_cache
+    try:
+        cached = await get_stats_cache(username)
+        if cached:
+            stats = json.loads(cached["stats_json"])
+            stats["isOnline"] = False
+            text = format_roblox_stats(stats)
+            text += f"\n\n⚠️ Кэш от {cached['updated_at'][:16]}"
+            await loading_msg.edit_text(text)
+            return
+    except Exception:
+        pass
+
+    # Fallback 2: old player_stats DB
+    try:
+        player = await get_player_by_username(username)
+        if player:
+            old_stats = await get_player_stats(player["roblox_id"])
+            if old_stats:
+                text = _format_player_stats(player, old_stats, lang)
+                text += "\n\n⚠️ Данные из базы (сервер недоступен)"
+                await loading_msg.edit_text(text, parse_mode="Markdown")
                 return
-        except Exception:
-            pass
+    except Exception:
+        pass
 
-        # Fallback 2: try old player_stats DB
-        try:
-            player = await get_player_by_username(username)
-            if player:
-                old_stats = await get_player_stats(player["roblox_id"])
-                if old_stats:
-                    text = _format_player_stats(player, old_stats, lang)
-                    text += "\n\n⚠️ Данные из базы (сервер недоступен)"
-                    await loading_msg.edit_text(text, parse_mode="Markdown")
-                    return
-        except Exception:
-            pass
-
-        try:
-            await loading_msg.edit_text(t("stats_timeout", lang))
-        except Exception:
-            pass
+    try:
+        await loading_msg.edit_text(t("stats_timeout", lang))
+    except Exception:
+        pass
 
 
 # ─── Match history ───
