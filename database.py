@@ -305,6 +305,13 @@ async def init_db():
         except Exception:
             pass
 
+        await conn.execute("""
+            CREATE TABLE IF NOT EXISTS news_subscribers (
+                user_id BIGINT PRIMARY KEY,
+                subscribed_at TEXT NOT NULL
+            )
+        """)
+
 
 # ─── Tasks ───
 
@@ -1425,6 +1432,34 @@ async def add_player_match(roblox_id: int, map_name: str | None,
          enemies_killed, bosses_killed, towers_placed, coins_earned,
          damage_dealt, duration_seconds, ts)
     return match_id
+
+
+# ─── News Subscribers ───
+
+async def subscribe_news(user_id: int):
+    pool = await get_pool()
+    now = now_msk().isoformat()
+    await pool.execute("""
+        INSERT INTO news_subscribers (user_id, subscribed_at)
+        VALUES ($1, $2) ON CONFLICT (user_id) DO NOTHING
+    """, user_id, now)
+
+
+async def unsubscribe_news(user_id: int):
+    pool = await get_pool()
+    await pool.execute("DELETE FROM news_subscribers WHERE user_id = $1", user_id)
+
+
+async def is_news_subscriber(user_id: int) -> bool:
+    pool = await get_pool()
+    row = await pool.fetchrow("SELECT 1 FROM news_subscribers WHERE user_id = $1", user_id)
+    return row is not None
+
+
+async def get_all_subscribers() -> list[int]:
+    pool = await get_pool()
+    rows = await pool.fetch("SELECT user_id FROM news_subscribers")
+    return [r["user_id"] for r in rows]
 
 
 # ─── Stats Cache ───

@@ -30,6 +30,7 @@ from keyboards.inline import (
     user_status_notify_kb, admin_filter_kb, admin_tools_kb,
     admin_moderation_kb, ban_duration_kb,
     bulk_status_kb, link_duplicate_kb,
+    news_confirm_kb,
 )
 from texts import t
 from middlewares.throttle import invalidate_admin_cache
@@ -99,6 +100,11 @@ class AdminBulkSelect(StatesGroup):
 
 class AdminLinkDuplicate(StatesGroup):
     waiting_task_id = State()
+
+
+class AdminNews(StatesGroup):
+    waiting_content = State()
+    waiting_link = State()
     waiting_target_id = State()
 
 
@@ -1787,3 +1793,146 @@ async def process_link_target_id(message: Message, state: FSMContext):
         f"🔗 Задачи #{task_id} и #{target_id} связаны как дубликаты.",
         reply_markup=link_duplicate_kb(task_id),
     )
+
+
+# ─── News broadcast ───
+
+@router.message(Command("news"))
+async def cmd_news(message: Message, state: FSMContext):
+    if message.from_user.id != MAIN_ADMIN_ID:
+        return
+    await state.set_state(AdminNews.waiting_content)
+    await message.answer(t("news_prompt", "ru"))
+
+
+@router.callback_query(F.data == "adm:news_start")
+async def cb_news_start(callback: CallbackQuery, state: FSMContext):
+    if callback.from_user.id != MAIN_ADMIN_ID:
+        await callback.answer("⛔ Только главный админ", show_alert=True)
+        return
+    await state.set_state(AdminNews.waiting_content)
+    await callback.message.answer(t("news_prompt", "ru"))
+    await callback.answer()
+
+
+@router.message(AdminNews.waiting_content)
+async def process_news_content(message: Message, state: FSMContext):
+    # Store the message info for later broadcast
+    data = {}
+    if message.photo:
+        data["type"] = "photo"
+        data["file_id"] = message.photo[-1].file_id
+        data["caption"] = message.caption or ""
+    elif message.video:
+        data["type"] = "video"
+        data["file_id"] = message.video.file_id
+        data["caption"] = message.caption or ""
+    elif message.text:
+        data["type"] = "text"
+        data["text"] = message.text
+    else:
+        await message.answer("❌ Отправьте текст, фото или видео.")
+        return
+
+    await state.update_data(news=data)
+    await state.set_state(AdminNews.waiting_link)
+    await message.answer(t("news_link_prompt", "ru"), parse_mode="Markdown")
+
+
+@router.message(AdminNews.waiting_link)
+async def process_news_link(message: Message, state: FSMContext):
+    import asyncio
+    from database import get_all_subscribers
+
+    text = (message.text or "").strip()
+    fsm_data = await state.get_data()
+    news = fsm_data.get("news", {})
+
+    # Parse link
+    link_url = None
+    link_text = None
+    if text and text != "/skip":
+        parts = text.split(maxsplit=1)
+        if parts[0].startswith("http"):
+            link_url = parts[0]
+            link_text = parts[1] if len(parts) > 1 else "Подробнее"
+        else:
+            await message.answer("❌ Некорректная ссылка. Начните с http:// или /skip")
+            return
+
+    news["link_url"] = link_url
+    news["link_text"] = link_text
+    await state.update_data(news=news)
+
+    # Preview
+    from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
+    preview_kb = None
+    if link_url:
+        preview_kb = InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text=link_text, url=link_url)],
+        ])
+
+    if news["type"] == "photo":
+        await message.answer_photo(news["file_id"], caption=news.get("caption"), reply_markup=preview_kb)
+    elif news["type"] == "video":
+        await message.answer_video(news["file_id"], caption=news.get("caption"), reply_markup=preview_kb)
+    else:
+        await message.answer(news["text"], reply_markup=preview_kb)
+
+    subs = await get_all_subscribers()
+    if not subs:
+        await state.clear()
+        await message.answer(t("news_no_subs", "ru"))
+        return
+
+    await message.answer(t("news_confirm", "ru", count=len(subs)), reply_markup=news_confirm_kb())
+
+
+@router.callback_query(F.data == "adm:news_confirm")
+async def cb_news_confirm(callback: CallbackQuery, state: FSMContext):
+    import asyncio
+    from database import get_all_subscribers
+    from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
+
+    fsm_data = await state.get_data()
+    news = fsm_data.get("news")
+    if not news:
+        await callback.answer("❌ Нет данных")
+        await state.clear()
+        return
+
+    subs = await get_all_subscribers()
+    await state.clear()
+    await callback.message.edit_text("📢 Рассылка...")
+    await callback.answer()
+
+    link_kb = None
+    if news.get("link_url"):
+        link_kb = InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text=news["link_text"], url=news["link_url"])],
+        ])
+
+    ok = 0
+    fail = 0
+    bot = callback.bot
+    for uid in subs:
+        try:
+            if news["type"] == "photo":
+                await bot.send_photo(uid, news["file_id"], caption=news.get("caption"), reply_markup=link_kb)
+            elif news["type"] == "video":
+                await bot.send_video(uid, news["file_id"], caption=news.get("caption"), reply_markup=link_kb)
+            else:
+                await bot.send_message(uid, news["text"], reply_markup=link_kb)
+            ok += 1
+        except Exception:
+            fail += 1
+        await asyncio.sleep(0.05)
+
+    await callback.message.edit_text(t("news_sent", "ru", ok=ok, fail=fail))
+
+
+@router.callback_query(F.data == "adm:news_cancel")
+async def cb_news_cancel(callback: CallbackQuery, state: FSMContext):
+    await state.clear()
+    await callback.message.edit_text(t("news_cancel", "ru"))
+    await callback.answer()

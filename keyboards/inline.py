@@ -23,6 +23,7 @@ def main_menu_kb(lang: str = "ru") -> InlineKeyboardMarkup:
             InlineKeyboardButton(text=t("btn_top", lang), callback_data="game:top"),
             InlineKeyboardButton(text=t("btn_link", lang), callback_data="game:link"),
         ],
+        [InlineKeyboardButton(text=t("btn_news_sub", lang), callback_data="news:toggle")],
         [InlineKeyboardButton(text=t("btn_lang", lang), callback_data="change_lang")],
     ])
 
@@ -118,6 +119,7 @@ def admin_tools_kb() -> InlineKeyboardMarkup:
             InlineKeyboardButton(text="✅ Массовые", callback_data="adm:bulk_start"),
             InlineKeyboardButton(text="🔗 Дубликат", callback_data="adm:link_start"),
         ],
+        [InlineKeyboardButton(text="📢 Новости", callback_data="adm:news_start")],
         [InlineKeyboardButton(text="◀️ Назад", callback_data="adm:menu")],
     ])
 
@@ -467,4 +469,13 @@ def leaderboard_kb(lang: str = "ru") -> InlineKeyboardMarkup:
             InlineKeyboardButton(text="⏰", callback_data="game:top:playtime_minutes"),
         ],
         [InlineKeyboardButton(text=t("btn_menu", lang), callback_data="main_menu")],
+    ])
+
+
+def news_confirm_kb() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [
+            InlineKeyboardButton(text="✅ Отправить", callback_data="adm:news_confirm"),
+            InlineKeyboardButton(text="❌ Отмена", callback_data="adm:news_cancel"),
+        ],
     ])

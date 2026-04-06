@@ -285,6 +285,7 @@ async def main():
         BotCommand(command="link", description="Привязать Roblox / Link Roblox"),
         BotCommand(command="top", description="Топ игроков / Leaderboard"),
         BotCommand(command="admin", description="Админ-панель"),
+        BotCommand(command="news", description="Опубликовать новость (админ)"),
         BotCommand(command="export", description="Экспорт задач (CSV)"),
         BotCommand(command="lang", description="Сменить язык / Change language"),
     ])

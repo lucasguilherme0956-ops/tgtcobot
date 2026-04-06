@@ -22,6 +22,7 @@ from database import (
     get_user_profile,
     get_player_by_telegram, get_player_by_username, get_player_stats,
     get_player_matches, get_player_leaderboard, link_player_telegram,
+    subscribe_news, unsubscribe_news, is_news_subscriber,
 )
 from keyboards.inline import (
     main_menu_kb, skip_photo_kb, photo_progress_kb, confirm_task_kb,
@@ -132,6 +133,25 @@ async def cb_set_lang(callback: CallbackQuery):
 async def cmd_lang(message: Message):
     lang = await get_user_lang(message.from_user.id)
     await message.answer(t("lang_prompt", lang), reply_markup=lang_select_kb())
+
+
+# ─── News subscribe/unsubscribe ───
+
+@router.callback_query(F.data == "news:toggle")
+async def cb_news_toggle(callback: CallbackQuery):
+    lang = await get_user_lang(callback.from_user.id)
+    uid = callback.from_user.id
+    if await is_news_subscriber(uid):
+        await unsubscribe_news(uid)
+        await callback.message.edit_text(
+            t("news_unsubscribed", lang), reply_markup=main_menu_kb(lang),
+        )
+    else:
+        await subscribe_news(uid)
+        await callback.message.edit_text(
+            t("news_subscribed", lang), reply_markup=main_menu_kb(lang),
+        )
+    await callback.answer()
 
 
 # ─── Профиль ───

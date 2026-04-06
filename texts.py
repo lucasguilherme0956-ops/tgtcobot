@@ -137,6 +137,17 @@ TEXTS = {
         "stats_timeout": "❌ Игрок не найден или сервер недоступен. Попробуйте позже.",
         "match_title": "📄 **Последние матчи:**\n\n",
         "match_line": "{result} {map} ({diff}) — волна {wave}, {kills}☠\n",
+        # News
+        "news_subscribed": "✅ Вы подписались на новости игры!",
+        "news_unsubscribed": "🔕 Вы отписались от новостей.",
+        "news_prompt": "📢 Отправьте сообщение для рассылки (текст, фото или видео):",
+        "news_link_prompt": "🔗 Отправьте URL для кнопки-ссылки и текст через пробел (например: `https://example.com Подробнее`)\nИли /skip чтобы пропустить.",
+        "news_confirm": "📢 Предпросмотр отправлен выше. Разослать {count} подписчикам?",
+        "news_sent": "✅ Рассылка завершена!\nОтправлено: {ok} | Ошибок: {fail}",
+        "news_cancel": "❌ Рассылка отменена.",
+        "news_no_subs": "📭 Нет подписчиков.",
+        "btn_news_sub": "📢 Подписаться на новости",
+        "btn_news_unsub": "🔕 Отписаться от новостей",
     },
     "en": {
         "welcome": (
@@ -274,6 +285,17 @@ TEXTS = {
         "stats_timeout": "❌ Player not found or server unavailable. Try again later.",
         "match_title": "📄 **Recent matches:**\n\n",
         "match_line": "{result} {map} ({diff}) — wave {wave}, {kills}☠\n",
+        # News
+        "news_subscribed": "✅ You subscribed to game news!",
+        "news_unsubscribed": "🔕 You unsubscribed from news.",
+        "news_prompt": "📢 Send a message to broadcast (text, photo or video):",
+        "news_link_prompt": "🔗 Send a URL and button text separated by space (e.g. `https://example.com Read more`)\nOr /skip to skip.",
+        "news_confirm": "📢 Preview sent above. Broadcast to {count} subscribers?",
+        "news_sent": "✅ Broadcast complete!\nSent: {ok} | Errors: {fail}",
+        "news_cancel": "❌ Broadcast cancelled.",
+        "news_no_subs": "📭 No subscribers.",
+        "btn_news_sub": "📢 Subscribe to news",
+        "btn_news_unsub": "🔕 Unsubscribe from news",
     },
 }
 
