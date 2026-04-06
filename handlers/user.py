@@ -1014,7 +1014,7 @@ async def _request_roblox_stats(message: Message, username: str, lang: str, plac
         if not waiters and key in stats_queue.stats_waiters:
             del stats_queue.stats_waiters[key]
 
-        # Fallback: try cached stats from DB
+        # Fallback 1: try cached stats
         import json
         from database import get_stats_cache
         from stats_queue import format_roblox_stats
@@ -1022,11 +1022,24 @@ async def _request_roblox_stats(message: Message, username: str, lang: str, plac
             cached = await get_stats_cache(username)
             if cached:
                 stats = json.loads(cached["stats_json"])
-                stats["isOnline"] = False  # кэш — статус неизвестен
+                stats["isOnline"] = False
                 text = format_roblox_stats(stats)
                 text += f"\n\n⚠️ Кэш от {cached['updated_at'][:16]}"
                 await loading_msg.edit_text(text)
                 return
+        except Exception:
+            pass
+
+        # Fallback 2: try old player_stats DB
+        try:
+            player = await get_player_by_username(username)
+            if player:
+                old_stats = await get_player_stats(player["roblox_id"])
+                if old_stats:
+                    text = _format_player_stats(player, old_stats, lang)
+                    text += "\n\n⚠️ Данные из базы (сервер недоступен)"
+                    await loading_msg.edit_text(text, parse_mode="Markdown")
+                    return
         except Exception:
             pass
 
