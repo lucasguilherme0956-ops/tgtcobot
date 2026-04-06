@@ -119,6 +119,7 @@ async def api_stats_receive(request):
     username = data.get("username", "")
     error = data.get("error")
     stats = data.get("stats")
+    place = data.get("place", "public")
     key = username.lower()
 
     # Cache stats in DB if we got valid data
@@ -126,7 +127,7 @@ async def api_stats_receive(request):
         import json
         from database import save_stats_cache
         try:
-            await save_stats_cache(username, json.dumps(stats))
+            await save_stats_cache(username, json.dumps(stats), place)
         except Exception as e:
             logger.error(f"Failed to cache stats for {username}: {e}")
 

@@ -283,12 +283,15 @@ async def init_db():
             )
         """)
 
+        # Recreate stats_cache with composite PK (username, place)
+        await conn.execute("DROP TABLE IF EXISTS stats_cache")
         await conn.execute("""
             CREATE TABLE IF NOT EXISTS stats_cache (
-                username TEXT PRIMARY KEY,
-                stats_json TEXT NOT NULL,
+                username TEXT NOT NULL,
                 place TEXT NOT NULL DEFAULT 'public',
-                updated_at TEXT NOT NULL
+                stats_json TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                PRIMARY KEY (username, place)
             )
         """)
 
@@ -1430,16 +1433,17 @@ async def save_stats_cache(username: str, stats_json: str, place: str = "public"
     pool = await get_pool()
     now = now_msk().isoformat()
     await pool.execute("""
-        INSERT INTO stats_cache (username, stats_json, place, updated_at)
+        INSERT INTO stats_cache (username, place, stats_json, updated_at)
         VALUES ($1, $2, $3, $4)
-        ON CONFLICT (username) DO UPDATE SET stats_json=$2, place=$3, updated_at=$4
-    """, username.lower(), stats_json, place, now)
+        ON CONFLICT (username, place) DO UPDATE SET stats_json=$3, updated_at=$4
+    """, username.lower(), place, stats_json, now)
 
 
-async def get_stats_cache(username: str):
+async def get_stats_cache(username: str, place: str = "public"):
     pool = await get_pool()
     return await pool.fetchrow(
-        "SELECT * FROM stats_cache WHERE username=$1", username.lower()
+        "SELECT * FROM stats_cache WHERE username=$1 AND place=$2",
+        username.lower(), place,
     )
 async def get_player_matches(roblox_id: int, limit: int = 10) -> list[dict]:
     pool = await get_pool()

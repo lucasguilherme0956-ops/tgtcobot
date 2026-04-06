@@ -1024,7 +1024,7 @@ async def _request_roblox_stats(message: Message, username: str, lang: str, plac
 
     # Fallback 1: stats_cache
     try:
-        cached = await get_stats_cache(username)
+        cached = await get_stats_cache(username, place)
         if cached:
             stats = json.loads(cached["stats_json"])
             stats["isOnline"] = False
