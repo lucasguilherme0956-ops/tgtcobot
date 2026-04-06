@@ -219,6 +219,23 @@ async def api_pending_rewards(request):
     return web.json_response({"rewards": result})
 
 
+async def api_sync_codes(request):
+    """Roblox sends its validCodes table for sync."""
+    auth = request.headers.get("X-API-Key", "")
+    if not auth or auth != GAME_API_KEY:
+        return web.json_response({"error": "unauthorized"}, status=401)
+    try:
+        data = await request.json()
+    except Exception:
+        return web.json_response({"error": "invalid json"}, status=400)
+    codes = data.get("codes", {})
+    if not codes or not isinstance(codes, dict):
+        return web.json_response({"error": "missing codes"}, status=400)
+    from database import sync_roblox_codes
+    await sync_roblox_codes(codes)
+    return web.json_response({"ok": True, "synced": len(codes)})
+
+
 async def api_check_code(request):
     """Roblox validates a promo code entered by a player."""
     auth = request.headers.get("X-API-Key", "")
@@ -313,6 +330,7 @@ async def main():
     app.router.add_post("/api/bulk-stats", api_bulk_stats)
     app.router.add_post("/api/check-code", api_check_code)
     app.router.add_get("/api/pending-rewards", api_pending_rewards)
+    app.router.add_post("/api/sync-codes", api_sync_codes)
     port = int(os.environ.get("PORT", 10000))
     runner = web.AppRunner(app)
     await runner.setup()

@@ -1793,6 +1793,61 @@ async def list_promo_codes(limit: int = 20, offset: int = 0) -> list[dict]:
     return [_record_to_dict(r) for r in rows]
 
 
+async def get_public_active_codes() -> list[dict]:
+    """Get active public codes (not personal) for display to users."""
+    pool = await get_pool()
+    rows = await pool.fetch("""
+        SELECT code, reward_text, max_uses, used_count, expires_at
+        FROM promo_codes
+        WHERE active = TRUE AND telegram_id IS NULL
+          AND (expires_at IS NULL OR expires_at > $1)
+          AND used_count < max_uses
+        ORDER BY created_at DESC
+    """, now_msk().isoformat())
+    return [_record_to_dict(r) for r in rows]
+
+
+async def sync_roblox_codes(codes: dict):
+    """Sync codes from Roblox validCodes table. Creates missing, deactivates removed."""
+    pool = await get_pool()
+    roblox_code_names = set()
+    for code_name, reward in codes.items():
+        upper = code_name.upper()
+        roblox_code_names.add(upper)
+        existing = await get_promo_code(code_name)
+        if existing:
+            if not existing["active"]:
+                await pool.execute(
+                    "UPDATE promo_codes SET active = TRUE WHERE id = $1", existing["id"])
+            continue
+        import json
+        reward_text_parts = []
+        if reward.get("Money"):
+            reward_text_parts.append(f"{reward['Money']} монет")
+        if reward.get("EventMoney"):
+            reward_text_parts.append(f"{reward['EventMoney']} ивент монет")
+        if reward.get("Skin"):
+            reward_text_parts.append(f"скин {reward['Skin']}")
+        if reward.get("Tower"):
+            reward_text_parts.append(f"башня {reward['Tower']}")
+        if reward.get("GiveAll"):
+            reward_text_parts.append("все башни и скины")
+        reward_text = ", ".join(reward_text_parts) or "награда"
+        limit = reward.get("Limit", 1000000)
+        await create_promo_code(
+            code=code_name, reward_text=reward_text, max_uses=limit,
+            expires_at=None, created_by=0,
+            roblox_reward_data=json.dumps(reward, ensure_ascii=False),
+        )
+    # Deactivate codes from Roblox source that are no longer in the list
+    rows = await pool.fetch(
+        "SELECT id, code FROM promo_codes WHERE created_by = 0 AND active = TRUE")
+    for r in rows:
+        if r["code"] not in roblox_code_names:
+            await pool.execute(
+                "UPDATE promo_codes SET active = FALSE WHERE id = $1", r["id"])
+
+
 async def count_promo_codes() -> int:
     pool = await get_pool()
     return await pool.fetchval("SELECT COUNT(*) FROM promo_codes") or 0
