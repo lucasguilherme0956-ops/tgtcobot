@@ -172,6 +172,7 @@ class AdminGiveaway(StatesGroup):
     waiting_title = State()
     waiting_description = State()
     waiting_prize = State()
+    waiting_roblox_reward = State()
     waiting_winner_count = State()
     waiting_end_time = State()
 
@@ -2673,6 +2674,36 @@ async def process_giveaway_prize(message: Message, state: FSMContext):
     await _del_bot_prompt(message, state)
     await _safe_delete(message)
     await state.update_data(gw_prize=prize)
+    await state.set_state(AdminGiveaway.waiting_roblox_reward)
+    prompt = await message.answer(
+        "🎮 Награда в Roblox (JSON):\n"
+        "Пример: `{\"Money\": 133767}` или `{\"Skin\": \"Alpha Soldier\"}`\n"
+        "Или /skip если приз без кода в игре.",
+        parse_mode="Markdown",
+    )
+    await state.update_data(_prompt_msg_id=prompt.message_id)
+
+
+@router.message(AdminGiveaway.waiting_roblox_reward)
+async def process_giveaway_roblox_reward(message: Message, state: FSMContext):
+    text = (message.text or "").strip()
+    roblox_data = None
+    if text != "/skip":
+        import json
+        try:
+            parsed = json.loads(text)
+            if not isinstance(parsed, dict):
+                raise ValueError
+            roblox_data = text
+        except (json.JSONDecodeError, ValueError):
+            err = await message.answer("❌ Неверный JSON. Пример: `{\"Money\": 500}` или /skip",
+                                       parse_mode="Markdown")
+            await _safe_delete(message)
+            asyncio.create_task(_auto_delete(err))
+            return
+    await _del_bot_prompt(message, state)
+    await _safe_delete(message)
+    await state.update_data(gw_roblox_reward=roblox_data)
     await state.set_state(AdminGiveaway.waiting_winner_count)
     prompt = await message.answer("🏆 Сколько победителей? (число):")
     await state.update_data(_prompt_msg_id=prompt.message_id)
@@ -2719,7 +2750,7 @@ async def process_giveaway_end(message: Message, state: FSMContext):
         title=data["gw_title"],
         description=data["gw_description"],
         prize_text=data["gw_prize"],
-        prize_promo_reward=None,
+        prize_promo_reward=data.get("gw_roblox_reward"),
         winner_count=data["gw_winner_count"],
         ends_at=ends_at,
         created_by=message.from_user.id,
