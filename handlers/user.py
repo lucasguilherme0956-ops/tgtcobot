@@ -1022,6 +1022,7 @@ async def _request_roblox_stats(message: Message, username: str, lang: str, plac
             cached = await get_stats_cache(username)
             if cached:
                 stats = json.loads(cached["stats_json"])
+                stats["isOnline"] = False  # кэш — статус неизвестен
                 text = format_roblox_stats(stats)
                 text += f"\n\n⚠️ Кэш от {cached['updated_at'][:16]}"
                 await loading_msg.edit_text(text)
