@@ -164,6 +164,34 @@ async def api_stats_receive(request):
     return web.json_response({"ok": True, "delivered": delivered})
 
 
+async def api_bulk_stats(request):
+    """Receive stats for all online players from Roblox — cache them."""
+    try:
+        data = await request.json()
+    except Exception:
+        return web.json_response({"error": "invalid json"}, status=400)
+
+    if data.get("secret") != STATS_SECRET:
+        return web.json_response({"error": "unauthorized"}, status=401)
+
+    import json
+    from database import save_stats_cache
+
+    players = data.get("players", [])
+    saved = 0
+    for p in players:
+        username = p.get("username")
+        if not username:
+            continue
+        try:
+            await save_stats_cache(username, json.dumps(p))
+            saved += 1
+        except Exception as e:
+            logger.error(f"bulk-stats cache error for {username}: {e}")
+
+    return web.json_response({"ok": True, "saved": saved})
+
+
 async def main():
     if not BOT_TOKEN:
         logger.error("BOT_TOKEN не задан в .env!")
@@ -237,6 +265,7 @@ async def main():
     app.router.add_post("/api/heartbeat", api_heartbeat)
     app.router.add_get("/api/pending", api_pending)
     app.router.add_post("/api/stats", api_stats_receive)
+    app.router.add_post("/api/bulk-stats", api_bulk_stats)
     port = int(os.environ.get("PORT", 10000))
     runner = web.AppRunner(app)
     await runner.setup()
