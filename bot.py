@@ -193,6 +193,32 @@ async def api_bulk_stats(request):
     return web.json_response({"ok": True, "saved": saved})
 
 
+async def api_pending_rewards(request):
+    """Roblox polls this to get pending rewards for a player."""
+    auth = request.headers.get("X-API-Key", "")
+    if not auth or auth != GAME_API_KEY:
+        return web.json_response({"error": "unauthorized"}, status=401)
+    username = request.query.get("username", "").strip()
+    if not username:
+        return web.json_response({"rewards": []})
+    from database import get_pending_rewards, claim_pending_rewards
+    import json
+    rewards = await get_pending_rewards(username)
+    if not rewards:
+        return web.json_response({"rewards": []})
+    result = []
+    ids = []
+    for r in rewards:
+        try:
+            reward_data = json.loads(r["reward_json"])
+        except Exception:
+            reward_data = {}
+        result.append({"id": r["id"], "reward": reward_data, "text": r["reward_text"]})
+        ids.append(r["id"])
+    await claim_pending_rewards(ids)
+    return web.json_response({"rewards": result})
+
+
 async def api_check_code(request):
     """Roblox validates a promo code entered by a player."""
     auth = request.headers.get("X-API-Key", "")
@@ -286,6 +312,7 @@ async def main():
     app.router.add_post("/api/stats", api_stats_receive)
     app.router.add_post("/api/bulk-stats", api_bulk_stats)
     app.router.add_post("/api/check-code", api_check_code)
+    app.router.add_get("/api/pending-rewards", api_pending_rewards)
     port = int(os.environ.get("PORT", 10000))
     runner = web.AppRunner(app)
     await runner.setup()

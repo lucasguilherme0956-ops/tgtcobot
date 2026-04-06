@@ -1328,7 +1328,8 @@ async def cmd_redeem(message: Message, state: FSMContext):
         code = args[1].strip()
         result = await redeem_promo_code(code, message.from_user.id)
         if result["ok"]:
-            await message.answer(t("promo_success", lang, reward=result["reward"]))
+            extra = "\n\n🎮 Зайдите в игру — награда начислится автоматически!" if result.get("roblox_queued") else ""
+            await message.answer(t("promo_success", lang, reward=result["reward"]) + extra)
         else:
             key = f"promo_{result['error']}"
             await message.answer(t(key, lang))
@@ -1361,7 +1362,8 @@ async def process_redeem_code(message: Message, state: FSMContext):
         return
     result = await redeem_promo_code(code, message.from_user.id)
     if result["ok"]:
-        await message.answer(t("promo_success", lang, reward=result["reward"]),
+        extra = "\n\n🎮 Зайдите в игру — награда начислится автоматически!" if result.get("roblox_queued") else ""
+        await message.answer(t("promo_success", lang, reward=result["reward"]) + extra,
                              reply_markup=back_to_menu_kb(lang))
     else:
         key = f"promo_{result['error']}"

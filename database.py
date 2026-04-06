@@ -440,6 +440,23 @@ async def init_db():
             )
         """)
 
+        # ─── Pending rewards (for Roblox to pick up) ───
+        await conn.execute("""
+            CREATE TABLE IF NOT EXISTS pending_rewards (
+                id SERIAL PRIMARY KEY,
+                roblox_username TEXT NOT NULL,
+                reward_json TEXT NOT NULL,
+                reward_text TEXT NOT NULL,
+                source TEXT NOT NULL DEFAULT 'redeem',
+                created_at TEXT NOT NULL,
+                claimed BOOLEAN NOT NULL DEFAULT FALSE
+            )
+        """)
+        try:
+            await conn.execute("CREATE INDEX IF NOT EXISTS idx_pending_rewards_user ON pending_rewards(roblox_username, claimed)")
+        except Exception:
+            pass
+
 
 # ─── Tasks ───
 
@@ -1755,7 +1772,17 @@ async def redeem_promo_code(code: str, telegram_id: int,
     await pool.execute(
         "UPDATE promo_codes SET used_count = used_count + 1 WHERE id = $1",
         promo["id"])
-    return {"ok": True, "reward": promo["reward_text"]}
+    # Queue reward for Roblox if roblox_reward_data exists and user has linked account
+    roblox_queued = False
+    if promo.get("roblox_reward_data"):
+        linked = await pool.fetchval(
+            "SELECT roblox_username FROM telegram_roblox_links WHERE telegram_id = $1",
+            telegram_id)
+        if linked:
+            await add_pending_reward(linked, promo["roblox_reward_data"],
+                                     promo["reward_text"], source="redeem")
+            roblox_queued = True
+    return {"ok": True, "reward": promo["reward_text"], "roblox_queued": roblox_queued}
 
 
 async def list_promo_codes(limit: int = 20, offset: int = 0) -> list[dict]:
@@ -2155,3 +2182,34 @@ async def generate_winner_code(telegram_id: int, reward_text: str,
         telegram_id=telegram_id, roblox_reward_data=roblox_reward_data,
     )
     return code
+
+
+# ═══════════════════════════════════════════════
+# Pending Rewards (Roblox picks up)
+# ═══════════════════════════════════════════════
+
+async def add_pending_reward(roblox_username: str, reward_json: str,
+                             reward_text: str, source: str = "redeem") -> int:
+    pool = await get_pool()
+    return await pool.fetchval("""
+        INSERT INTO pending_rewards (roblox_username, reward_json, reward_text, source, created_at)
+        VALUES ($1, $2, $3, $4, $5) RETURNING id
+    """, roblox_username.lower(), reward_json, reward_text, source, now_msk().isoformat())
+
+
+async def get_pending_rewards(roblox_username: str) -> list[dict]:
+    pool = await get_pool()
+    rows = await pool.fetch("""
+        SELECT * FROM pending_rewards
+        WHERE roblox_username = $1 AND claimed = FALSE
+        ORDER BY created_at
+    """, roblox_username.lower())
+    return [_record_to_dict(r) for r in rows]
+
+
+async def claim_pending_rewards(reward_ids: list[int]):
+    pool = await get_pool()
+    if reward_ids:
+        await pool.execute(
+            "UPDATE pending_rewards SET claimed = TRUE WHERE id = ANY($1::int[])",
+            reward_ids)
