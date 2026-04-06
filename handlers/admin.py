@@ -100,6 +100,7 @@ class AdminBulkSelect(StatesGroup):
 
 class AdminLinkDuplicate(StatesGroup):
     waiting_task_id = State()
+    waiting_target_id = State()
 
 
 class AdminNews(StatesGroup):
