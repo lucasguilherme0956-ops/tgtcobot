@@ -1,3 +1,5 @@
+import asyncio
+
 from aiogram import Router, F
 from aiogram.filters import Command
 from aiogram.fsm.context import FSMContext
@@ -36,6 +38,35 @@ from texts import t
 from middlewares.throttle import invalidate_admin_cache
 
 router = Router()
+
+
+async def _safe_delete(*msgs):
+    """Safely delete messages, ignoring errors."""
+    for m in msgs:
+        try:
+            await m.delete()
+        except Exception:
+            pass
+
+
+async def _auto_delete(msg, delay: float = 4.0):
+    """Delete a message after a delay."""
+    await asyncio.sleep(delay)
+    try:
+        await msg.delete()
+    except Exception:
+        pass
+
+
+async def _del_bot_prompt(message: Message, state: FSMContext):
+    """Delete the previous bot prompt stored in FSM."""
+    data = await state.get_data()
+    mid = data.get("_prompt_msg_id")
+    if mid:
+        try:
+            await message.bot.delete_message(message.chat.id, mid)
+        except Exception:
+            pass
 
 
 async def _admin_menu_kb():
@@ -433,15 +464,19 @@ async def process_admin_comment(message: Message, state: FSMContext):
     text = message.text
 
     if not text:
-        await message.answer("❌ Отправьте текстовый комментарий.")
+        err = await message.answer("❌ Отправьте текстовый комментарий.")
+        await _safe_delete(message)
+        asyncio.create_task(_auto_delete(err))
         return
 
     task = await get_task(task_id)
     if not task:
         await message.answer("❌ Задача не найдена.")
+        await _safe_delete(message)
         await state.clear()
         return
 
+    await _safe_delete(message)
     admin_name = message.from_user.username or message.from_user.full_name
     await add_comment(task_id, message.from_user.id, text, author_name=admin_name)
     await state.clear()
@@ -504,7 +539,8 @@ async def cmd_add_admin(message: Message, state: FSMContext):
         await message.answer("⛔ Только главный админ может добавлять админов.")
         return
     await state.set_state(AdminAddUser.waiting_id)
-    await message.answer("Введите Telegram ID нового админа:")
+    prompt = await message.answer("Введите Telegram ID нового админа:")
+    await state.update_data(_prompt_msg_id=prompt.message_id)
 
 
 @router.message(AdminAddUser.waiting_id)
@@ -512,9 +548,13 @@ async def process_add_admin(message: Message, state: FSMContext):
     try:
         new_id = int(message.text.strip())
     except (ValueError, AttributeError):
-        await message.answer("❌ Введите корректный числовой ID.")
+        err = await message.answer("❌ Введите корректный числовой ID.")
+        await _safe_delete(message)
+        asyncio.create_task(_auto_delete(err))
         return
 
+    await _del_bot_prompt(message, state)
+    await _safe_delete(message)
     await add_admin(new_id)
     invalidate_admin_cache(new_id)
     await state.clear()
@@ -530,10 +570,11 @@ async def cmd_remove_admin(message: Message, state: FSMContext):
     admins = await get_all_admin_ids()
     admins_text = "\n".join(f"• `{a}`" for a in admins)
     await state.set_state(AdminRemoveUser.waiting_id)
-    await message.answer(
+    prompt = await message.answer(
         f"Текущие админы:\n{admins_text}\n\nВведите ID админа для удаления:",
         parse_mode="Markdown",
     )
+    await state.update_data(_prompt_msg_id=prompt.message_id)
 
 
 @router.message(AdminRemoveUser.waiting_id)
@@ -541,13 +582,19 @@ async def process_remove_admin(message: Message, state: FSMContext):
     try:
         rm_id = int(message.text.strip())
     except (ValueError, AttributeError):
-        await message.answer("❌ Введите корректный числовой ID.")
+        err = await message.answer("❌ Введите корректный числовой ID.")
+        await _safe_delete(message)
+        asyncio.create_task(_auto_delete(err))
         return
 
     if rm_id == MAIN_ADMIN_ID:
-        await message.answer("❌ Нельзя удалить главного админа.")
+        err = await message.answer("❌ Нельзя удалить главного админа.")
+        await _safe_delete(message)
+        asyncio.create_task(_auto_delete(err))
         return
 
+    await _del_bot_prompt(message, state)
+    await _safe_delete(message)
     await remove_admin(rm_id)
     invalidate_admin_cache(rm_id)
     await state.clear()
@@ -621,18 +668,25 @@ async def process_notify_times(message: Message, state: FSMContext):
                     continue
             except ValueError:
                 pass
-        await message.answer(f"❌ Неверный формат времени: `{t}`. Используйте HH:MM.",
+        err = await message.answer(f"❌ Неверный формат времени: `{t}`. Используйте HH:MM.",
                              parse_mode="Markdown")
+        await _safe_delete(message)
+        asyncio.create_task(_auto_delete(err))
         return
 
     if not times:
-        await message.answer("❌ Укажите хотя бы одно время.")
+        err = await message.answer("❌ Укажите хотя бы одно время.")
+        await _safe_delete(message)
+        asyncio.create_task(_auto_delete(err))
         return
 
     if len(times) > 12:
-        await message.answer("❌ Максимум 12 временных точек.")
+        err = await message.answer("❌ Максимум 12 временных точек.")
+        await _safe_delete(message)
+        asyncio.create_task(_auto_delete(err))
         return
 
+    await _safe_delete(message)
     settings = await get_notify_settings(message.from_user.id)
     await set_notify_settings(message.from_user.id, times, bool(settings["enabled"]))
     await state.clear()
@@ -716,12 +770,17 @@ async def process_ban_user_id(message: Message, state: FSMContext):
     try:
         user_id = int(message.text.strip())
     except (ValueError, AttributeError):
-        await message.answer("❌ Введите числовой ID.")
+        err = await message.answer("❌ Введите числовой ID.")
+        await _safe_delete(message)
+        asyncio.create_task(_auto_delete(err))
         return
     if await is_admin(user_id):
-        await message.answer("❌ Нельзя забанить админа.")
+        err = await message.answer("❌ Нельзя забанить админа.")
+        await _safe_delete(message)
+        asyncio.create_task(_auto_delete(err))
         await state.clear()
         return
+    await _safe_delete(message)
     await state.clear()
     await message.answer(
         f"⏱ Выберите срок бана для `{user_id}`:",
@@ -770,8 +829,11 @@ async def process_unban_user(message: Message, state: FSMContext):
     try:
         user_id = int(message.text.strip())
     except (ValueError, AttributeError):
-        await message.answer("❌ Введите числовой ID.")
+        err = await message.answer("❌ Введите числовой ID.")
+        await _safe_delete(message)
+        asyncio.create_task(_auto_delete(err))
         return
+    await _safe_delete(message)
     info = await get_ban_info(user_id)
     if not info:
         await message.answer(f"ℹ️ Пользователь `{user_id}` не забанен.", parse_mode="Markdown")
@@ -798,15 +860,21 @@ async def process_warn_user_id(message: Message, state: FSMContext):
     try:
         user_id = int(message.text.strip())
     except (ValueError, AttributeError):
-        await message.answer("❌ Введите числовой ID.")
+        err = await message.answer("❌ Введите числовой ID.")
+        await _safe_delete(message)
+        asyncio.create_task(_auto_delete(err))
         return
     if await is_admin(user_id):
-        await message.answer("❌ Нельзя выдать пред админу.")
+        err = await message.answer("❌ Нельзя выдать пред админу.")
+        await _safe_delete(message)
+        asyncio.create_task(_auto_delete(err))
         await state.clear()
         return
+    await _safe_delete(message)
     await state.update_data(warn_target=user_id)
     await state.set_state(AdminWarnUser.waiting_reason)
-    await message.answer("📝 Введите причину предупреждения (или /skip):")
+    prompt = await message.answer("📝 Введите причину предупреждения (или /skip):")
+    await state.update_data(_prompt_msg_id=prompt.message_id)
 
 
 @router.message(AdminWarnUser.waiting_reason)
@@ -815,6 +883,8 @@ async def process_warn_reason(message: Message, state: FSMContext):
     user_id = data["warn_target"]
     reason = "Нарушение правил" if message.text.strip() == "/skip" else message.text.strip()
 
+    await _del_bot_prompt(message, state)
+    await _safe_delete(message)
     await warn_user(user_id, message.from_user.id, reason)
     count = await get_warning_count(user_id)
     await state.clear()
@@ -847,8 +917,11 @@ async def process_check_warns(message: Message, state: FSMContext):
     try:
         user_id = int(message.text.strip())
     except (ValueError, AttributeError):
-        await message.answer("❌ Введите числовой ID.")
+        err = await message.answer("❌ Введите числовой ID.")
+        await _safe_delete(message)
+        asyncio.create_task(_auto_delete(err))
         return
+    await _safe_delete(message)
     await state.clear()
 
     count = await get_warning_count(user_id)
@@ -940,8 +1013,12 @@ async def process_admin_search(message: Message, state: FSMContext):
 
     query = (message.text or "").strip()
     if not query:
-        await message.answer("❌ Введите текст для поиска.")
+        err = await message.answer("❌ Введите текст для поиска.")
+        await _safe_delete(message)
+        asyncio.create_task(_auto_delete(err))
         return
+
+    await _safe_delete(message)
 
     # Убираем # если пользователь ищет по ID
     if query.startswith("#"):
@@ -1218,6 +1295,7 @@ async def process_admin_deadline(message: Message, state: FSMContext):
     if text.lower() in ("нет", "no", "-", "убрать"):
         await set_deadline(task_id, None)
         await state.clear()
+        await _safe_delete(message)
         task = await get_task(task_id)
         await message.answer(
             f"✅ Дедлайн для задачи #{task_id} убран.",
@@ -1235,10 +1313,13 @@ async def process_admin_deadline(message: Message, state: FSMContext):
             continue
 
     if not deadline:
-        await message.answer("❌ Неверный формат. Используйте `ДД.ММ.ГГГГ` или `ДД.ММ.ГГГГ ЧЧ:ММ`",
+        err = await message.answer("❌ Неверный формат. Используйте `ДД.ММ.ГГГГ` или `ДД.ММ.ГГГГ ЧЧ:ММ`",
                              parse_mode="Markdown")
+        await _safe_delete(message)
+        asyncio.create_task(_auto_delete(err))
         return
 
+    await _safe_delete(message)
     await set_deadline(task_id, deadline.isoformat())
     await state.clear()
     task = await get_task(task_id)
@@ -1424,12 +1505,18 @@ async def process_admin_assign(message: Message, state: FSMContext):
     try:
         assign_id = int(message.text.strip())
     except (ValueError, AttributeError):
-        await message.answer("❌ Введите числовой ID.")
+        err = await message.answer("❌ Введите числовой ID.")
+        await _safe_delete(message)
+        asyncio.create_task(_auto_delete(err))
         return
 
     if not await is_admin(assign_id):
-        await message.answer("❌ Этот ID не является админом.")
+        err = await message.answer("❌ Этот ID не является админом.")
+        await _safe_delete(message)
+        asyncio.create_task(_auto_delete(err))
         return
+
+    await _safe_delete(message)
 
     task = await get_task(task_id)
     old_assigned = task.get("assigned_admin_name") or "—"
@@ -1533,6 +1620,7 @@ async def process_admin_tag(message: Message, state: FSMContext):
     text = (message.text or "").strip()
 
     if text.lower() in ("отмена", "cancel", "выход"):
+        await _safe_delete(message)
         await state.clear()
         task = await get_task(task_id)
         if task:
@@ -1543,6 +1631,7 @@ async def process_admin_tag(message: Message, state: FSMContext):
         return
 
     admin_name = message.from_user.username or message.from_user.full_name
+    await _safe_delete(message)
 
     if text.startswith("-"):
         tag_name = text[1:].strip()
@@ -1550,15 +1639,18 @@ async def process_admin_tag(message: Message, state: FSMContext):
             await remove_tag_from_task(task_id, tag_name)
             await add_history_entry(task_id, message.from_user.id, admin_name,
                                     "tag_removed", tag_name, None)
-            await message.answer(f"🏷 Тег `{tag_name}` удалён.", parse_mode="Markdown")
+            reply = await message.answer(f"🏷 Тег `{tag_name}` удалён.", parse_mode="Markdown")
+            asyncio.create_task(_auto_delete(reply))
     else:
         if len(text) > 30:
-            await message.answer("❌ Тег слишком длинный (макс 30 символов).")
+            err = await message.answer("❌ Тег слишком длинный (макс 30 символов).")
+            asyncio.create_task(_auto_delete(err))
             return
         await add_tag_to_task(task_id, text)
         await add_history_entry(task_id, message.from_user.id, admin_name,
                                 "tag_added", None, text)
-        await message.answer(f"🏷 Тег `{text}` добавлен. Ещё тег или `отмена`.", parse_mode="Markdown")
+        reply = await message.answer(f"🏷 Тег `{text}` добавлен. Ещё тег или `отмена`.", parse_mode="Markdown")
+        asyncio.create_task(_auto_delete(reply, 6.0))
 
 
 # ─── Лог админ-активности ───
@@ -1629,6 +1721,7 @@ async def process_bulk_select(message: Message, state: FSMContext):
 
     text = (message.text or "").strip()
     if text.lower() in ("отмена", "cancel"):
+        await _safe_delete(message)
         await state.clear()
         await message.answer("❌ Отменено.", reply_markup=admin_tools_kb())
         return
@@ -1641,13 +1734,18 @@ async def process_bulk_select(message: Message, state: FSMContext):
             task_ids.append(int(r.lstrip("#")))
 
     if not task_ids:
-        await message.answer("❌ Не удалось распознать ID. Попробуйте ещё раз.")
+        err = await message.answer("❌ Не удалось распознать ID. Попробуйте ещё раз.")
+        await _safe_delete(message)
+        asyncio.create_task(_auto_delete(err))
         return
 
     if len(task_ids) > 50:
-        await message.answer("❌ Максимум 50 задач за раз.")
+        err = await message.answer("❌ Максимум 50 задач за раз.")
+        await _safe_delete(message)
+        asyncio.create_task(_auto_delete(err))
         return
 
+    await _safe_delete(message)
     await state.clear()
     ids_str = ", ".join(f"#{i}" for i in task_ids)
     await message.answer(
@@ -1737,23 +1835,30 @@ async def process_link_task_id(message: Message, state: FSMContext):
 
     text = (message.text or "").strip().lstrip("#")
     if text.lower() in ("отмена", "cancel"):
+        await _safe_delete(message)
         await state.clear()
         await message.answer("❌ Отменено.", reply_markup=admin_tools_kb())
         return
 
     if not text.isdigit():
-        await message.answer("❌ Отправьте числовой ID задачи.")
+        err = await message.answer("❌ Отправьте числовой ID задачи.")
+        await _safe_delete(message)
+        asyncio.create_task(_auto_delete(err))
         return
 
     task_id = int(text)
     task = await get_task(task_id)
     if not task:
-        await message.answer("❌ Задача не найдена.")
+        err = await message.answer("❌ Задача не найдена.")
+        await _safe_delete(message)
+        asyncio.create_task(_auto_delete(err))
         return
 
+    await _safe_delete(message)
     await state.set_state(AdminLinkDuplicate.waiting_target_id)
     await state.update_data(link_task_id=task_id)
-    await message.answer(f"✅ Задача #{task_id}. Теперь отправьте ID второй задачи:")
+    prompt = await message.answer(f"✅ Задача #{task_id}. Теперь отправьте ID второй задачи:")
+    await state.update_data(_prompt_msg_id=prompt.message_id)
 
 
 @router.message(AdminLinkDuplicate.waiting_target_id)
@@ -1764,12 +1869,15 @@ async def process_link_target_id(message: Message, state: FSMContext):
 
     text = (message.text or "").strip().lstrip("#")
     if text.lower() in ("отмена", "cancel"):
+        await _safe_delete(message)
         await state.clear()
         await message.answer("❌ Отменено.", reply_markup=admin_tools_kb())
         return
 
     if not text.isdigit():
-        await message.answer("❌ Отправьте числовой ID задачи.")
+        err = await message.answer("❌ Отправьте числовой ID задачи.")
+        await _safe_delete(message)
+        asyncio.create_task(_auto_delete(err))
         return
 
     data = await state.get_data()
@@ -1777,14 +1885,20 @@ async def process_link_target_id(message: Message, state: FSMContext):
     target_id = int(text)
 
     if task_id == target_id:
-        await message.answer("❌ Нельзя связать задачу саму с собой.")
+        err = await message.answer("❌ Нельзя связать задачу саму с собой.")
+        await _safe_delete(message)
+        asyncio.create_task(_auto_delete(err))
         return
 
     target = await get_task(target_id)
     if not target:
-        await message.answer("❌ Задача не найдена.")
+        err = await message.answer("❌ Задача не найдена.")
+        await _safe_delete(message)
+        asyncio.create_task(_auto_delete(err))
         return
 
+    await _del_bot_prompt(message, state)
+    await _safe_delete(message)
     await link_tasks(task_id, target_id, "duplicate")
     admin_name = message.from_user.username or message.from_user.full_name
     await add_admin_log(message.from_user.id, admin_name, "link_tasks",
@@ -1803,7 +1917,8 @@ async def cmd_news(message: Message, state: FSMContext):
     if message.from_user.id != MAIN_ADMIN_ID:
         return
     await state.set_state(AdminNews.waiting_content)
-    await message.answer(t("news_prompt", "ru"))
+    prompt = await message.answer(t("news_prompt", "ru"))
+    await state.update_data(_prompt_msg_id=prompt.message_id)
 
 
 @router.callback_query(F.data == "adm:news_start")
@@ -1812,7 +1927,8 @@ async def cb_news_start(callback: CallbackQuery, state: FSMContext):
         await callback.answer("⛔ Только главный админ", show_alert=True)
         return
     await state.set_state(AdminNews.waiting_content)
-    await callback.message.answer(t("news_prompt", "ru"))
+    prompt = await callback.message.answer(t("news_prompt", "ru"))
+    await state.update_data(_prompt_msg_id=prompt.message_id)
     await callback.answer()
 
 
@@ -1832,17 +1948,21 @@ async def process_news_content(message: Message, state: FSMContext):
         data["type"] = "text"
         data["text"] = message.text
     else:
-        await message.answer("❌ Отправьте текст, фото или видео.")
+        err = await message.answer("❌ Отправьте текст, фото или видео.")
+        await _safe_delete(message)
+        asyncio.create_task(_auto_delete(err))
         return
 
+    await _del_bot_prompt(message, state)
+    await _safe_delete(message)
     await state.update_data(news=data)
     await state.set_state(AdminNews.waiting_link)
-    await message.answer(t("news_link_prompt", "ru"), parse_mode="Markdown")
+    prompt = await message.answer(t("news_link_prompt", "ru"), parse_mode="Markdown")
+    await state.update_data(_prompt_msg_id=prompt.message_id)
 
 
 @router.message(AdminNews.waiting_link)
 async def process_news_link(message: Message, state: FSMContext):
-    import asyncio
     from database import get_all_subscribers
 
     text = (message.text or "").strip()
@@ -1858,8 +1978,13 @@ async def process_news_link(message: Message, state: FSMContext):
             link_url = parts[0]
             link_text = parts[1] if len(parts) > 1 else "Подробнее"
         else:
-            await message.answer("❌ Некорректная ссылка. Начните с http:// или /skip")
+            err = await message.answer("❌ Некорректная ссылка. Начните с http:// или /skip")
+            await _safe_delete(message)
+            asyncio.create_task(_auto_delete(err))
             return
+
+    await _del_bot_prompt(message, state)
+    await _safe_delete(message)
 
     news["link_url"] = link_url
     news["link_text"] = link_text
@@ -1874,11 +1999,11 @@ async def process_news_link(message: Message, state: FSMContext):
         ])
 
     if news["type"] == "photo":
-        await message.answer_photo(news["file_id"], caption=news.get("caption"), reply_markup=preview_kb)
+        preview_msg = await message.answer_photo(news["file_id"], caption=news.get("caption"), reply_markup=preview_kb)
     elif news["type"] == "video":
-        await message.answer_video(news["file_id"], caption=news.get("caption"), reply_markup=preview_kb)
+        preview_msg = await message.answer_video(news["file_id"], caption=news.get("caption"), reply_markup=preview_kb)
     else:
-        await message.answer(news["text"], reply_markup=preview_kb)
+        preview_msg = await message.answer(news["text"], reply_markup=preview_kb)
 
     subs = await get_all_subscribers()
     if not subs:
@@ -1886,12 +2011,12 @@ async def process_news_link(message: Message, state: FSMContext):
         await message.answer(t("news_no_subs", "ru"))
         return
 
+    await state.update_data(_preview_msg_id=preview_msg.message_id)
     await message.answer(t("news_confirm", "ru", count=len(subs)), reply_markup=news_confirm_kb())
 
 
 @router.callback_query(F.data == "adm:news_confirm")
 async def cb_news_confirm(callback: CallbackQuery, state: FSMContext):
-    import asyncio
     from database import get_all_subscribers
     from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
 
@@ -1901,6 +2026,14 @@ async def cb_news_confirm(callback: CallbackQuery, state: FSMContext):
         await callback.answer("❌ Нет данных")
         await state.clear()
         return
+
+    # Delete preview message
+    preview_mid = fsm_data.get("_preview_msg_id")
+    if preview_mid:
+        try:
+            await callback.bot.delete_message(callback.message.chat.id, preview_mid)
+        except Exception:
+            pass
 
     subs = await get_all_subscribers()
     await state.clear()
@@ -1934,6 +2067,13 @@ async def cb_news_confirm(callback: CallbackQuery, state: FSMContext):
 
 @router.callback_query(F.data == "adm:news_cancel")
 async def cb_news_cancel(callback: CallbackQuery, state: FSMContext):
+    fsm_data = await state.get_data()
+    preview_mid = fsm_data.get("_preview_msg_id")
+    if preview_mid:
+        try:
+            await callback.bot.delete_message(callback.message.chat.id, preview_mid)
+        except Exception:
+            pass
     await state.clear()
     await callback.message.edit_text(t("news_cancel", "ru"))
     await callback.answer()

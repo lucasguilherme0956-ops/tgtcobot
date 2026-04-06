@@ -38,6 +38,24 @@ router = Router()
 MAX_PHOTOS = 5
 MIN_DESCRIPTION_LENGTH = 10
 
+
+async def _safe_delete(*msgs):
+    """Safely delete messages, ignoring errors."""
+    for m in msgs:
+        try:
+            await m.delete()
+        except Exception:
+            pass
+
+
+async def _auto_delete(msg, delay: float = 4.0):
+    """Delete a message after a delay."""
+    await asyncio.sleep(delay)
+    try:
+        await msg.delete()
+    except Exception:
+        pass
+
 # Анти-спам: паттерны мусорных описаний
 _SPAM_RE = re.compile(
     r'^(.)(\1{5,})|'          # один символ повторяется 6+ раз (аааааа)
@@ -249,17 +267,24 @@ async def process_description(message: Message, state: FSMContext):
     lang = data.get("lang", "ru")
     text = message.text
     if not text:
-        await message.answer(t("desc_text_only", lang))
+        err = await message.answer(t("desc_text_only", lang))
+        await _safe_delete(message)
+        asyncio.create_task(_auto_delete(err))
         return
 
     if len(text) > MAX_DESCRIPTION_LENGTH:
-        await message.answer(t("desc_too_long", lang, cur=len(text), max=MAX_DESCRIPTION_LENGTH))
+        err = await message.answer(t("desc_too_long", lang, cur=len(text), max=MAX_DESCRIPTION_LENGTH))
+        await _safe_delete(message)
+        asyncio.create_task(_auto_delete(err))
         return
 
     if _is_spam(text):
-        await message.answer(t("spam_rejected", lang))
+        err = await message.answer(t("spam_rejected", lang))
+        await _safe_delete(message)
+        asyncio.create_task(_auto_delete(err))
         return
 
+    await _safe_delete(message)
     await state.update_data(description=text, photos=[])
     await state.set_state(CreateTask.photo)
     await message.answer(t("send_photo_first", lang), reply_markup=skip_photo_kb(lang))
@@ -272,12 +297,15 @@ async def process_photo(message: Message, state: FSMContext):
     photos = data.get("photos", [])
 
     if len(photos) >= MAX_PHOTOS:
-        await message.answer(t("photo_limit", lang))
+        err = await message.answer(t("photo_limit", lang))
+        await _safe_delete(message)
+        asyncio.create_task(_auto_delete(err))
         return
 
     photo_file_id = message.photo[-1].file_id
     photos.append(photo_file_id)
     await state.update_data(photos=photos)
+    await _safe_delete(message)
 
     if len(photos) >= MAX_PHOTOS:
         await _show_confirm(message, state)
@@ -305,7 +333,9 @@ async def cb_skip_photo(callback: CallbackQuery, state: FSMContext):
 async def process_photo_invalid(message: Message, state: FSMContext):
     data = await state.get_data()
     lang = data.get("lang", "ru")
-    await message.answer(t("photo_invalid", lang))
+    err = await message.answer(t("photo_invalid", lang))
+    await _safe_delete(message)
+    asyncio.create_task(_auto_delete(err))
 
 
 async def _build_confirm_text(state: FSMContext):
@@ -549,19 +579,25 @@ async def process_edit_task(message: Message, state: FSMContext):
     text = message.text
 
     if not text or not text.strip():
-        await message.answer(t("desc_text_only", lang))
+        err = await message.answer(t("desc_text_only", lang))
+        await _safe_delete(message)
+        asyncio.create_task(_auto_delete(err))
         return
 
     if len(text) > MAX_DESCRIPTION_LENGTH:
-        await message.answer(t("desc_too_long", lang, cur=len(text), max=MAX_DESCRIPTION_LENGTH))
+        err = await message.answer(t("desc_too_long", lang, cur=len(text), max=MAX_DESCRIPTION_LENGTH))
+        await _safe_delete(message)
+        asyncio.create_task(_auto_delete(err))
         return
 
     task = await get_task(task_id)
     if not task:
         await message.answer(t("task_not_found", lang))
+        await _safe_delete(message)
         await state.clear()
         return
 
+    await _safe_delete(message)
     old_desc = task["description"]
     await update_task_description(task_id, text.strip())
     username = message.from_user.username or message.from_user.full_name
@@ -603,19 +639,25 @@ async def process_user_comment(message: Message, state: FSMContext):
     text = message.text
 
     if not text or not text.strip():
-        await message.answer(t("comment_empty", lang))
+        err = await message.answer(t("comment_empty", lang))
+        await _safe_delete(message)
+        asyncio.create_task(_auto_delete(err))
         return
 
     if len(text) > 1000:
-        await message.answer(t("comment_too_long", lang))
+        err = await message.answer(t("comment_too_long", lang))
+        await _safe_delete(message)
+        asyncio.create_task(_auto_delete(err))
         return
 
     task = await get_task(task_id)
     if not task:
         await message.answer(t("task_not_found", lang))
+        await _safe_delete(message)
         await state.clear()
         return
 
+    await _safe_delete(message)
     username = message.from_user.username or message.from_user.full_name
     await add_comment(task_id, message.from_user.id, text.strip(), author_name=username)
     await state.clear()
@@ -997,6 +1039,7 @@ async def process_stats_lookup(message: Message, state: FSMContext):
     data = await state.get_data()
     place = data.get("place", "public")
     await state.clear()
+    await _safe_delete(message)
     if not username or len(username) > 50:
         await message.answer(t("stats_not_found", lang))
         return
@@ -1202,15 +1245,18 @@ async def process_link_roblox(message: Message, state: FSMContext):
     username = (message.text or "").strip()
     if not username or len(username) > 50:
         await state.clear()
+        await _safe_delete(message)
         await message.answer(t("link_fail", lang, name=username or "?"))
         return
 
     player = await get_player_by_username(username)
     if not player:
         await state.clear()
+        await _safe_delete(message)
         await message.answer(t("link_fail", lang, name=username))
         return
 
+    await _safe_delete(message)
     await link_player_telegram(player["roblox_id"], message.from_user.id)
     await state.clear()
     await message.answer(
