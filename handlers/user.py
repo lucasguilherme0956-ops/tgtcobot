@@ -24,7 +24,7 @@ from database import (
     get_player_matches, get_player_leaderboard, link_player_telegram,
     subscribe_news, unsubscribe_news, is_news_subscriber,
     link_telegram_roblox, get_linked_roblox_username, get_stats_cache,
-    redeem_promo_code, get_public_active_codes,
+    redeem_promo_code, get_public_active_codes, is_admin,
     get_faq_categories, get_faqs_by_category, get_faq, count_faqs,
     get_active_polls, get_poll, get_poll_results, vote_poll, get_user_poll_vote, count_poll_votes,
     get_server_status_current, get_server_peak_today,
@@ -141,6 +141,17 @@ async def cmd_start(message: Message, state: FSMContext):
     await state.clear()
     lang = await get_user_lang(message.from_user.id)
     await message.answer(t("welcome", lang), reply_markup=main_menu_kb(lang))
+
+
+@router.message(Command("cancel"))
+async def cmd_cancel(message: Message, state: FSMContext):
+    current = await state.get_state()
+    await _safe_delete(message)
+    if current is None:
+        return
+    await state.clear()
+    lang = await get_user_lang(message.from_user.id)
+    await message.answer("❌ Отменено.", reply_markup=main_menu_kb(lang))
 
 
 @router.callback_query(F.data == "main_menu")
@@ -1342,13 +1353,20 @@ async def cmd_redeem(message: Message, state: FSMContext):
 @router.callback_query(F.data == "redeem:start")
 async def cb_redeem_start(callback: CallbackQuery, state: FSMContext):
     lang = await get_user_lang(callback.from_user.id)
-    codes = await get_public_active_codes()
+    user_is_admin = await is_admin(callback.from_user.id)
+    codes = await get_public_active_codes(include_private=user_is_admin)
     text = t("promo_enter_code", lang)
     if codes:
         text += "\n\n📋 Активные коды:\n"
         for c in codes:
             left = c["max_uses"] - c["used_count"]
-            text += f"▸ `{c['code']}` — {c['reward_text']} ({left} осталось)\n"
+            place_tag = ""
+            p = c.get("place", "all")
+            if p == "private":
+                place_tag = " 🔒"
+            elif p == "public":
+                place_tag = " 🌐"
+            text += f"▸ `{c['code']}` — {c['reward_text']} ({left} ост.){place_tag}\n"
     await state.set_state(RedeemCode.waiting_code)
     try:
         await callback.message.edit_text(text, parse_mode="Markdown")

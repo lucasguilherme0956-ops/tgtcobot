@@ -335,6 +335,10 @@ async def init_db():
                 created_at TEXT NOT NULL
             )
         """)
+        try:
+            await conn.execute("ALTER TABLE promo_codes ADD COLUMN place TEXT NOT NULL DEFAULT 'all'")
+        except Exception:
+            pass
         await conn.execute("""
             CREATE TABLE IF NOT EXISTS promo_redemptions (
                 id SERIAL PRIMARY KEY,
@@ -1728,15 +1732,16 @@ async def process_match_report(roblox_id: int, roblox_username: str,
 async def create_promo_code(code: str, reward_text: str, max_uses: int,
                             expires_at: str | None, created_by: int,
                             telegram_id: int | None = None,
-                            roblox_reward_data: str | None = None) -> int:
+                            roblox_reward_data: str | None = None,
+                            place: str = "all") -> int:
     pool = await get_pool()
     return await pool.fetchval("""
         INSERT INTO promo_codes (code, reward_text, max_uses, expires_at,
-                                 created_by, telegram_id, roblox_reward_data, created_at)
-        VALUES (UPPER($1), $2, $3, $4, $5, $6, $7, $8)
+                                 created_by, telegram_id, roblox_reward_data, place, created_at)
+        VALUES (UPPER($1), $2, $3, $4, $5, $6, $7, $8, $9)
         RETURNING id
     """, code, reward_text, max_uses, expires_at,
-        created_by, telegram_id, roblox_reward_data, now_msk().isoformat())
+        created_by, telegram_id, roblox_reward_data, place, now_msk().isoformat())
 
 
 async def get_promo_code(code: str) -> dict | None:
@@ -1793,21 +1798,26 @@ async def list_promo_codes(limit: int = 20, offset: int = 0) -> list[dict]:
     return [_record_to_dict(r) for r in rows]
 
 
-async def get_public_active_codes() -> list[dict]:
-    """Get active public codes (not personal) for display to users."""
+async def get_public_active_codes(include_private: bool = False) -> list[dict]:
+    """Get active public codes for display. include_private=True shows private place codes too."""
     pool = await get_pool()
-    rows = await pool.fetch("""
-        SELECT code, reward_text, max_uses, used_count, expires_at
+    if include_private:
+        place_filter = "AND place IN ('all', 'public', 'private')"
+    else:
+        place_filter = "AND place IN ('all', 'public')"
+    rows = await pool.fetch(f"""
+        SELECT code, reward_text, max_uses, used_count, expires_at, place
         FROM promo_codes
         WHERE active = TRUE AND telegram_id IS NULL
           AND (expires_at IS NULL OR expires_at > $1)
           AND used_count < max_uses
+          {place_filter}
         ORDER BY created_at DESC
     """, now_msk().isoformat())
     return [_record_to_dict(r) for r in rows]
 
 
-async def sync_roblox_codes(codes: dict):
+async def sync_roblox_codes(codes: dict, place: str = "all"):
     """Sync codes from Roblox validCodes table. Creates missing, deactivates removed."""
     pool = await get_pool()
     roblox_code_names = set()
@@ -1838,6 +1848,7 @@ async def sync_roblox_codes(codes: dict):
             code=code_name, reward_text=reward_text, max_uses=limit,
             expires_at=None, created_by=0,
             roblox_reward_data=json.dumps(reward, ensure_ascii=False),
+            place=place,
         )
     # Deactivate codes from Roblox source that are no longer in the list
     rows = await pool.fetch(

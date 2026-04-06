@@ -232,8 +232,9 @@ async def api_sync_codes(request):
     if not codes or not isinstance(codes, dict):
         return web.json_response({"error": "missing codes"}, status=400)
     from database import sync_roblox_codes
-    await sync_roblox_codes(codes)
-    return web.json_response({"ok": True, "synced": len(codes)})
+    place = data.get("place", "all")
+    await sync_roblox_codes(codes, place=place)
+    return web.json_response({"ok": True, "synced": len(codes), "place": place})
 
 
 async def api_check_code(request):
@@ -349,6 +350,7 @@ async def main():
         BotCommand(command="link", description="Привязать Roblox / Link Roblox"),
         BotCommand(command="top", description="Топ игроков / Leaderboard"),
         BotCommand(command="admin", description="Админ-панель"),
+        BotCommand(command="cancel", description="Отменить текущее действие"),
         BotCommand(command="news", description="Опубликовать новость (админ)"),
         BotCommand(command="export", description="Экспорт задач (CSV)"),
         BotCommand(command="lang", description="Сменить язык / Change language"),

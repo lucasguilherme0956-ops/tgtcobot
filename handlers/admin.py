@@ -153,6 +153,7 @@ class AdminPromo(StatesGroup):
     waiting_reward = State()
     waiting_max_uses = State()
     waiting_roblox_reward = State()
+    waiting_place = State()
     waiting_expiry = State()
 
 
@@ -175,6 +176,20 @@ class AdminGiveaway(StatesGroup):
     waiting_roblox_reward = State()
     waiting_winner_count = State()
     waiting_end_time = State()
+
+
+# ─── Команда /cancel (admin) ───
+
+@router.message(Command("cancel"))
+async def cmd_cancel_admin(message: Message, state: FSMContext):
+    if not await is_admin(message.from_user.id):
+        return
+    current = await state.get_state()
+    await _safe_delete(message)
+    if current is None:
+        return
+    await state.clear()
+    await message.answer("❌ Отменено.", reply_markup=await _admin_menu_kb())
 
 
 # ─── Команда /admin ───
@@ -2226,12 +2241,32 @@ async def process_promo_roblox_reward(message: Message, state: FSMContext):
     await _del_bot_prompt(message, state)
     await _safe_delete(message)
     await state.update_data(promo_roblox_data=roblox_data)
-    await state.set_state(AdminPromo.waiting_expiry)
-    prompt = await message.answer("📅 Дата истечения (ДД.ММ.ГГГГ) или /skip:")
+    await state.set_state(AdminPromo.waiting_place)
+    prompt = await message.answer("🌐 Для какого плейса?\n\n1️⃣ `all` — оба\n2️⃣ `public` — только публик\n3️⃣ `private` — только приватка",
+                                  parse_mode="Markdown")
     await state.update_data(_prompt_msg_id=prompt.message_id)
 
 
-@router.message(AdminPromo.waiting_expiry)
+@router.message(AdminPromo.waiting_place)
+async def process_promo_place(message: Message, state: FSMContext):
+    text = (message.text or "").strip().lower()
+    if text in ("1", "all"):
+        place = "all"
+    elif text in ("2", "public"):
+        place = "public"
+    elif text in ("3", "private"):
+        place = "private"
+    else:
+        err = await message.answer("❌ Введите: all, public или private")
+        await _safe_delete(message)
+        asyncio.create_task(_auto_delete(err))
+        return
+    await _del_bot_prompt(message, state)
+    await _safe_delete(message)
+    await state.update_data(promo_place=place)
+    await state.set_state(AdminPromo.waiting_expiry)
+    prompt = await message.answer("📅 Дата истечения (ДД.ММ.ГГГГ) или /skip:")
+    await state.update_data(_prompt_msg_id=prompt.message_id)@router.message(AdminPromo.waiting_expiry)
 async def process_promo_expiry(message: Message, state: FSMContext):
     text = (message.text or "").strip()
     expires_at = None
@@ -2255,12 +2290,15 @@ async def process_promo_expiry(message: Message, state: FSMContext):
         expires_at=expires_at,
         created_by=message.from_user.id,
         roblox_reward_data=data.get("promo_roblox_data"),
+        place=data.get("promo_place", "all"),
     )
+    place_label = {"all": "все", "public": "публик", "private": "приватка"}.get(data.get("promo_place", "all"), "все")
     roblox_info = f"\n🎮 Roblox: `{data.get('promo_roblox_data', 'нет')}`" if data.get("promo_roblox_data") else ""
     await message.answer(
         f"✅ Промокод `{data['promo_code']}` создан!\n"
         f"Награда: {data['promo_reward']}\n"
         f"Макс. активаций: {data['promo_max_uses']}\n"
+        f"Плейс: {place_label}\n"
         f"Истекает: {text if text != '/skip' else 'никогда'}{roblox_info}",
         reply_markup=promo_admin_kb(),
         parse_mode="Markdown",
