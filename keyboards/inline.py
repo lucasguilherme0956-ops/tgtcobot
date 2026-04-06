@@ -23,6 +23,18 @@ def main_menu_kb(lang: str = "ru") -> InlineKeyboardMarkup:
             InlineKeyboardButton(text=t("btn_top", lang), callback_data="game:top"),
             InlineKeyboardButton(text=t("btn_link", lang), callback_data="game:link"),
         ],
+        [
+            InlineKeyboardButton(text=t("btn_redeem", lang), callback_data="redeem:start"),
+            InlineKeyboardButton(text=t("btn_giveaways", lang), callback_data="giveaway:list:0"),
+        ],
+        [
+            InlineKeyboardButton(text=t("btn_server", lang), callback_data="server:status"),
+            InlineKeyboardButton(text=t("btn_faq", lang), callback_data="faq:categories"),
+        ],
+        [
+            InlineKeyboardButton(text=t("btn_polls", lang), callback_data="poll:list:0"),
+            InlineKeyboardButton(text=t("btn_weekly_top", lang), callback_data="weeklytop:view"),
+        ],
         [InlineKeyboardButton(text=t("btn_news_sub", lang), callback_data="news:toggle")],
         [InlineKeyboardButton(text=t("btn_lang", lang), callback_data="change_lang")],
     ])
@@ -120,6 +132,14 @@ def admin_tools_kb() -> InlineKeyboardMarkup:
             InlineKeyboardButton(text="🔗 Дубликат", callback_data="adm:link_start"),
         ],
         [InlineKeyboardButton(text="📢 Новости", callback_data="adm:news_start")],
+        [
+            InlineKeyboardButton(text="🎟 Промокоды", callback_data="adm:promo"),
+            InlineKeyboardButton(text="🎁 Розыгрыши", callback_data="adm:giveaway"),
+        ],
+        [
+            InlineKeyboardButton(text="📊 Опросы", callback_data="adm:poll"),
+            InlineKeyboardButton(text="❓ FAQ", callback_data="adm:faq"),
+        ],
         [InlineKeyboardButton(text="◀️ Назад", callback_data="adm:menu")],
     ])
 
@@ -479,3 +499,179 @@ def news_confirm_kb() -> InlineKeyboardMarkup:
             InlineKeyboardButton(text="❌ Отмена", callback_data="adm:news_cancel"),
         ],
     ])
+
+
+# ─── Promo codes ───
+
+def promo_admin_kb() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="➕ Создать промокод", callback_data="adm:promo_create")],
+        [InlineKeyboardButton(text="📋 Список промокодов", callback_data="adm:promo_list:0")],
+        [InlineKeyboardButton(text="◀️ Инструменты", callback_data="adm:tools")],
+    ])
+
+
+def promo_list_kb(promos: list[dict], offset: int, total: int, page_size: int = 5) -> InlineKeyboardMarkup:
+    buttons = []
+    for p in promos:
+        status = "✅" if p["active"] else "❌"
+        buttons.append([InlineKeyboardButton(
+            text=f"{status} {p['code']} ({p['used_count']}/{p['max_uses']})",
+            callback_data=f"adm:promo_view:{p['id']}",
+        )])
+    nav = []
+    if offset > 0:
+        nav.append(InlineKeyboardButton(text="◀️", callback_data=f"adm:promo_list:{offset - page_size}"))
+    current_page = offset // page_size + 1
+    total_pages = max(1, math.ceil(total / page_size))
+    nav.append(InlineKeyboardButton(text=f"{current_page}/{total_pages}", callback_data="tip:page"))
+    if offset + page_size < total:
+        nav.append(InlineKeyboardButton(text="▶️", callback_data=f"adm:promo_list:{offset + page_size}"))
+    buttons.append(nav)
+    buttons.append([InlineKeyboardButton(text="◀️ Назад", callback_data="adm:promo")])
+    return InlineKeyboardMarkup(inline_keyboard=buttons)
+
+
+def promo_view_kb(code_id: int) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="🚫 Деактивировать", callback_data=f"adm:promo_deactivate:{code_id}")],
+        [InlineKeyboardButton(text="◀️ Назад", callback_data="adm:promo_list:0")],
+    ])
+
+
+# ─── FAQ ───
+
+def faq_categories_kb(categories: list[str], lang: str = "ru") -> InlineKeyboardMarkup:
+    buttons = []
+    for cat in categories:
+        buttons.append([InlineKeyboardButton(text=f"📁 {cat}", callback_data=f"faq:cat:{cat}:0")])
+    buttons.append([InlineKeyboardButton(text=t("btn_menu", lang), callback_data="main_menu")])
+    return InlineKeyboardMarkup(inline_keyboard=buttons)
+
+
+def faq_list_kb(faqs: list[dict], category: str, offset: int, total: int,
+                lang: str = "ru", page_size: int = 5) -> InlineKeyboardMarkup:
+    buttons = []
+    for f in faqs:
+        short = f["question"][:40] + ("..." if len(f["question"]) > 40 else "")
+        buttons.append([InlineKeyboardButton(text=f"❓ {short}", callback_data=f"faq:view:{f['id']}")])
+    nav = []
+    if offset > 0:
+        nav.append(InlineKeyboardButton(text="◀️", callback_data=f"faq:cat:{category}:{offset - page_size}"))
+    current_page = offset // page_size + 1
+    total_pages = max(1, math.ceil(total / page_size))
+    nav.append(InlineKeyboardButton(text=f"{current_page}/{total_pages}", callback_data="tip:page"))
+    if offset + page_size < total:
+        nav.append(InlineKeyboardButton(text="▶️", callback_data=f"faq:cat:{category}:{offset + page_size}"))
+    if nav:
+        buttons.append(nav)
+    buttons.append([InlineKeyboardButton(text="◀️ Категории", callback_data="faq:categories")])
+    return InlineKeyboardMarkup(inline_keyboard=buttons)
+
+
+def faq_view_kb(faq_id: int, category: str, lang: str = "ru") -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="◀️ Назад", callback_data=f"faq:cat:{category}:0")],
+    ])
+
+
+def faq_admin_kb() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="➕ Создать FAQ", callback_data="adm:faq_create")],
+        [InlineKeyboardButton(text="📋 Список FAQ", callback_data="adm:faq_list:0")],
+        [InlineKeyboardButton(text="◀️ Инструменты", callback_data="adm:tools")],
+    ])
+
+
+def faq_admin_entry_kb(faq_id: int) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="🗑 Удалить", callback_data=f"adm:faq_delete:{faq_id}")],
+        [InlineKeyboardButton(text="◀️ Назад", callback_data="adm:faq_list:0")],
+    ])
+
+
+# ─── Polls ───
+
+def poll_vote_kb(poll_id: int, results: list[dict], user_vote: int | None, closed: bool = False) -> InlineKeyboardMarkup:
+    total_votes = sum(r["votes"] for r in results)
+    buttons = []
+    for r in results:
+        pct = round(r["votes"] / max(total_votes, 1) * 100)
+        filled = round(r["votes"] / max(total_votes, 1) * 10)
+        bar = "█" * filled + "░" * (10 - filled)
+        check = "✅ " if r["id"] == user_vote else ""
+        text = f"{check}{r['option_text']}  {bar} {pct}% ({r['votes']})"
+        if closed:
+            buttons.append([InlineKeyboardButton(text=text, callback_data=f"tip:{r['option_text']}")])
+        else:
+            buttons.append([InlineKeyboardButton(text=text, callback_data=f"poll:vote:{poll_id}:{r['id']}")])
+    buttons.append([InlineKeyboardButton(text="◀️ Меню", callback_data="main_menu")])
+    return InlineKeyboardMarkup(inline_keyboard=buttons)
+
+
+def poll_admin_kb() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="➕ Создать опрос", callback_data="adm:poll_create")],
+        [InlineKeyboardButton(text="📋 Список опросов", callback_data="adm:poll_list:0")],
+        [InlineKeyboardButton(text="◀️ Инструменты", callback_data="adm:tools")],
+    ])
+
+
+def poll_admin_view_kb(poll_id: int, is_active: bool) -> InlineKeyboardMarkup:
+    buttons = []
+    if is_active:
+        buttons.append([InlineKeyboardButton(text="🔒 Закрыть опрос", callback_data=f"adm:poll_close:{poll_id}")])
+    buttons.append([InlineKeyboardButton(text="◀️ Назад", callback_data="adm:poll_list:0")])
+    return InlineKeyboardMarkup(inline_keyboard=buttons)
+
+
+# ─── Server status ───
+
+def server_status_kb(lang: str = "ru") -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="🔄 Обновить", callback_data="server:status")],
+        [InlineKeyboardButton(text=t("btn_menu", lang), callback_data="main_menu")],
+    ])
+
+
+# ─── Weekly top ───
+
+def weekly_top_kb(current_stat: str = "wins", lang: str = "ru") -> InlineKeyboardMarkup:
+    stats = [("🏆 Победы", "wins"), ("💰 Монеты", "money"), ("⏰ Время", "timePlayed")]
+    buttons = []
+    row = []
+    for label, stat in stats:
+        prefix = "▶ " if stat == current_stat else ""
+        row.append(InlineKeyboardButton(text=f"{prefix}{label}", callback_data=f"weeklytop:stat:{stat}"))
+    buttons.append(row)
+    buttons.append([InlineKeyboardButton(text=t("btn_menu", lang), callback_data="main_menu")])
+    return InlineKeyboardMarkup(inline_keyboard=buttons)
+
+
+# ─── Giveaways ───
+
+def giveaway_user_kb(giveaway_id: int, entered: bool, entry_count: int, lang: str = "ru") -> InlineKeyboardMarkup:
+    if entered:
+        btn = InlineKeyboardButton(text=t("btn_leave_giveaway", lang), callback_data=f"giveaway:leave:{giveaway_id}")
+    else:
+        btn = InlineKeyboardButton(text=t("btn_participate", lang, count=entry_count), callback_data=f"giveaway:join:{giveaway_id}")
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [btn],
+        [InlineKeyboardButton(text=t("btn_menu", lang), callback_data="main_menu")],
+    ])
+
+
+def giveaway_admin_kb() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="➕ Создать розыгрыш", callback_data="adm:giveaway_create")],
+        [InlineKeyboardButton(text="📋 Активные", callback_data="adm:giveaway_list:0")],
+        [InlineKeyboardButton(text="◀️ Инструменты", callback_data="adm:tools")],
+    ])
+
+
+def giveaway_admin_view_kb(giveaway_id: int, is_active: bool) -> InlineKeyboardMarkup:
+    buttons = []
+    if is_active:
+        buttons.append([InlineKeyboardButton(text="🏆 Завершить сейчас", callback_data=f"adm:giveaway_end:{giveaway_id}")])
+    buttons.append([InlineKeyboardButton(text="◀️ Назад", callback_data="adm:giveaway_list:0")])
+    return InlineKeyboardMarkup(inline_keyboard=buttons)

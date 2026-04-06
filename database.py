@@ -319,6 +319,127 @@ async def init_db():
             )
         """)
 
+        # ─── Promo codes ───
+        await conn.execute("""
+            CREATE TABLE IF NOT EXISTS promo_codes (
+                id SERIAL PRIMARY KEY,
+                code TEXT NOT NULL UNIQUE,
+                reward_text TEXT NOT NULL,
+                max_uses INTEGER NOT NULL DEFAULT 1,
+                used_count INTEGER NOT NULL DEFAULT 0,
+                expires_at TEXT,
+                created_by BIGINT NOT NULL,
+                telegram_id BIGINT,
+                roblox_reward_data TEXT,
+                active BOOLEAN NOT NULL DEFAULT TRUE,
+                created_at TEXT NOT NULL
+            )
+        """)
+        await conn.execute("""
+            CREATE TABLE IF NOT EXISTS promo_redemptions (
+                id SERIAL PRIMARY KEY,
+                code_id INTEGER NOT NULL,
+                telegram_id BIGINT NOT NULL,
+                roblox_username TEXT,
+                redeemed_at TEXT NOT NULL,
+                UNIQUE (code_id, telegram_id)
+            )
+        """)
+
+        # ─── FAQ ───
+        await conn.execute("""
+            CREATE TABLE IF NOT EXISTS faqs (
+                id SERIAL PRIMARY KEY,
+                category TEXT NOT NULL DEFAULT 'general',
+                question TEXT NOT NULL,
+                answer TEXT NOT NULL,
+                sort_order INTEGER NOT NULL DEFAULT 0,
+                created_by BIGINT NOT NULL,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            )
+        """)
+
+        # ─── Polls ───
+        await conn.execute("""
+            CREATE TABLE IF NOT EXISTS polls (
+                id SERIAL PRIMARY KEY,
+                question TEXT NOT NULL,
+                status TEXT NOT NULL DEFAULT 'active',
+                ends_at TEXT,
+                created_by BIGINT NOT NULL,
+                created_at TEXT NOT NULL
+            )
+        """)
+        await conn.execute("""
+            CREATE TABLE IF NOT EXISTS poll_options (
+                id SERIAL PRIMARY KEY,
+                poll_id INTEGER NOT NULL,
+                option_text TEXT NOT NULL,
+                sort_order INTEGER NOT NULL DEFAULT 0
+            )
+        """)
+        await conn.execute("""
+            CREATE TABLE IF NOT EXISTS poll_votes (
+                poll_id INTEGER NOT NULL,
+                user_id BIGINT NOT NULL,
+                option_id INTEGER NOT NULL,
+                voted_at TEXT NOT NULL,
+                PRIMARY KEY (poll_id, user_id)
+            )
+        """)
+
+        # ─── Server monitor ───
+        await conn.execute("""
+            CREATE TABLE IF NOT EXISTS server_status_log (
+                id SERIAL PRIMARY KEY,
+                online_count INTEGER NOT NULL,
+                recorded_at TEXT NOT NULL
+            )
+        """)
+        try:
+            await conn.execute("CREATE INDEX IF NOT EXISTS idx_server_status_time ON server_status_log(recorded_at)")
+        except Exception:
+            pass
+
+        # ─── Weekly top ───
+        await conn.execute("""
+            CREATE TABLE IF NOT EXISTS weekly_tops (
+                id SERIAL PRIMARY KEY,
+                week_start TEXT NOT NULL,
+                stat_name TEXT NOT NULL,
+                rankings_json TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                UNIQUE (week_start, stat_name)
+            )
+        """)
+
+        # ─── Giveaways ───
+        await conn.execute("""
+            CREATE TABLE IF NOT EXISTS giveaways (
+                id SERIAL PRIMARY KEY,
+                title TEXT NOT NULL,
+                description TEXT NOT NULL,
+                prize_text TEXT NOT NULL,
+                prize_promo_reward TEXT,
+                winner_count INTEGER NOT NULL DEFAULT 1,
+                ends_at TEXT NOT NULL,
+                status TEXT NOT NULL DEFAULT 'active',
+                created_by BIGINT NOT NULL,
+                created_at TEXT NOT NULL
+            )
+        """)
+        await conn.execute("""
+            CREATE TABLE IF NOT EXISTS giveaway_entries (
+                giveaway_id INTEGER NOT NULL,
+                telegram_id BIGINT NOT NULL,
+                username TEXT,
+                entered_at TEXT NOT NULL,
+                is_winner BOOLEAN NOT NULL DEFAULT FALSE,
+                PRIMARY KEY (giveaway_id, telegram_id)
+            )
+        """)
+
 
 # ─── Tasks ───
 
@@ -1581,3 +1702,456 @@ async def process_match_report(roblox_id: int, roblox_username: str,
     )
 
     return match_id
+
+
+# ═══════════════════════════════════════════════
+# Promo Codes
+# ═══════════════════════════════════════════════
+
+async def create_promo_code(code: str, reward_text: str, max_uses: int,
+                            expires_at: str | None, created_by: int,
+                            telegram_id: int | None = None,
+                            roblox_reward_data: str | None = None) -> int:
+    pool = await get_pool()
+    return await pool.fetchval("""
+        INSERT INTO promo_codes (code, reward_text, max_uses, expires_at,
+                                 created_by, telegram_id, roblox_reward_data, created_at)
+        VALUES (UPPER($1), $2, $3, $4, $5, $6, $7, $8)
+        RETURNING id
+    """, code, reward_text, max_uses, expires_at,
+        created_by, telegram_id, roblox_reward_data, now_msk().isoformat())
+
+
+async def get_promo_code(code: str) -> dict | None:
+    pool = await get_pool()
+    row = await pool.fetchrow(
+        "SELECT * FROM promo_codes WHERE UPPER(code) = UPPER($1)", code)
+    return _record_to_dict(row) if row else None
+
+
+async def redeem_promo_code(code: str, telegram_id: int,
+                            roblox_username: str | None = None) -> dict:
+    pool = await get_pool()
+    promo = await get_promo_code(code)
+    if not promo:
+        return {"ok": False, "error": "not_found"}
+    if not promo["active"]:
+        return {"ok": False, "error": "inactive"}
+    if promo["expires_at"] and promo["expires_at"] < now_msk().isoformat():
+        return {"ok": False, "error": "expired"}
+    if promo["used_count"] >= promo["max_uses"]:
+        return {"ok": False, "error": "used_up"}
+    if promo["telegram_id"] and promo["telegram_id"] != telegram_id:
+        return {"ok": False, "error": "personal"}
+    existing = await pool.fetchrow(
+        "SELECT 1 FROM promo_redemptions WHERE code_id=$1 AND telegram_id=$2",
+        promo["id"], telegram_id)
+    if existing:
+        return {"ok": False, "error": "already_redeemed"}
+    await pool.execute("""
+        INSERT INTO promo_redemptions (code_id, telegram_id, roblox_username, redeemed_at)
+        VALUES ($1, $2, $3, $4)
+    """, promo["id"], telegram_id, roblox_username, now_msk().isoformat())
+    await pool.execute(
+        "UPDATE promo_codes SET used_count = used_count + 1 WHERE id = $1",
+        promo["id"])
+    return {"ok": True, "reward": promo["reward_text"]}
+
+
+async def list_promo_codes(limit: int = 20, offset: int = 0) -> list[dict]:
+    pool = await get_pool()
+    rows = await pool.fetch(
+        "SELECT * FROM promo_codes ORDER BY created_at DESC LIMIT $1 OFFSET $2",
+        limit, offset)
+    return [_record_to_dict(r) for r in rows]
+
+
+async def count_promo_codes() -> int:
+    pool = await get_pool()
+    return await pool.fetchval("SELECT COUNT(*) FROM promo_codes") or 0
+
+
+async def deactivate_promo_code(code_id: int):
+    pool = await get_pool()
+    await pool.execute("UPDATE promo_codes SET active = FALSE WHERE id = $1", code_id)
+
+
+async def check_code_for_roblox(code: str, roblox_username: str) -> dict:
+    """Validate a promo code for Roblox redemption."""
+    promo = await get_promo_code(code)
+    if not promo:
+        return {"ok": False, "error": "Code not found"}
+    if not promo["active"]:
+        return {"ok": False, "error": "Code inactive"}
+    if promo["expires_at"] and promo["expires_at"] < now_msk().isoformat():
+        return {"ok": False, "error": "Code expired"}
+    if promo["used_count"] >= promo["max_uses"]:
+        return {"ok": False, "error": "Code fully used"}
+    if promo["telegram_id"]:
+        pool = await get_pool()
+        linked = await pool.fetchval(
+            "SELECT roblox_username FROM telegram_roblox_links WHERE telegram_id = $1",
+            promo["telegram_id"])
+        if not linked or linked.lower() != roblox_username.lower():
+            return {"ok": False, "error": "Code belongs to another player"}
+    pool = await get_pool()
+    await pool.execute(
+        "UPDATE promo_codes SET used_count = used_count + 1 WHERE id = $1",
+        promo["id"])
+    import json
+    reward = promo.get("roblox_reward_data")
+    try:
+        reward_data = json.loads(reward) if reward else {}
+    except Exception:
+        reward_data = {}
+    return {"ok": True, "reward": reward_data, "reward_text": promo["reward_text"]}
+
+
+# ═══════════════════════════════════════════════
+# FAQ
+# ═══════════════════════════════════════════════
+
+async def create_faq(category: str, question: str, answer: str,
+                     created_by: int, sort_order: int = 0) -> int:
+    pool = await get_pool()
+    ts = now_msk().isoformat()
+    return await pool.fetchval("""
+        INSERT INTO faqs (category, question, answer, sort_order, created_by, created_at, updated_at)
+        VALUES ($1, $2, $3, $4, $5, $6, $6) RETURNING id
+    """, category, question, answer, sort_order, created_by, ts)
+
+
+async def get_faq(faq_id: int) -> dict | None:
+    pool = await get_pool()
+    row = await pool.fetchrow("SELECT * FROM faqs WHERE id = $1", faq_id)
+    return _record_to_dict(row) if row else None
+
+
+async def update_faq(faq_id: int, **kwargs):
+    pool = await get_pool()
+    sets = []
+    vals = []
+    i = 1
+    for k, v in kwargs.items():
+        if v is not None:
+            sets.append(f"{k} = ${i}")
+            vals.append(v)
+            i += 1
+    sets.append(f"updated_at = ${i}")
+    vals.append(now_msk().isoformat())
+    vals.append(faq_id)
+    await pool.execute(
+        f"UPDATE faqs SET {', '.join(sets)} WHERE id = ${i + 1}", *vals)
+
+
+async def delete_faq(faq_id: int):
+    pool = await get_pool()
+    await pool.execute("DELETE FROM faqs WHERE id = $1", faq_id)
+
+
+async def get_faq_categories() -> list[str]:
+    pool = await get_pool()
+    rows = await pool.fetch("SELECT DISTINCT category FROM faqs ORDER BY category")
+    return [r["category"] for r in rows]
+
+
+async def get_faqs_by_category(category: str) -> list[dict]:
+    pool = await get_pool()
+    rows = await pool.fetch(
+        "SELECT * FROM faqs WHERE category = $1 ORDER BY sort_order, id", category)
+    return [_record_to_dict(r) for r in rows]
+
+
+async def count_faqs() -> int:
+    pool = await get_pool()
+    return await pool.fetchval("SELECT COUNT(*) FROM faqs") or 0
+
+
+# ═══════════════════════════════════════════════
+# Polls
+# ═══════════════════════════════════════════════
+
+async def create_poll(question: str, options: list[str], ends_at: str | None,
+                      created_by: int) -> int:
+    pool = await get_pool()
+    ts = now_msk().isoformat()
+    poll_id = await pool.fetchval("""
+        INSERT INTO polls (question, ends_at, created_by, created_at)
+        VALUES ($1, $2, $3, $4) RETURNING id
+    """, question, ends_at, created_by, ts)
+    for i, opt in enumerate(options):
+        await pool.execute("""
+            INSERT INTO poll_options (poll_id, option_text, sort_order)
+            VALUES ($1, $2, $3)
+        """, poll_id, opt.strip(), i)
+    return poll_id
+
+
+async def get_poll(poll_id: int) -> dict | None:
+    pool = await get_pool()
+    row = await pool.fetchrow("SELECT * FROM polls WHERE id = $1", poll_id)
+    return _record_to_dict(row) if row else None
+
+
+async def get_poll_options(poll_id: int) -> list[dict]:
+    pool = await get_pool()
+    rows = await pool.fetch(
+        "SELECT * FROM poll_options WHERE poll_id = $1 ORDER BY sort_order", poll_id)
+    return [_record_to_dict(r) for r in rows]
+
+
+async def get_poll_results(poll_id: int) -> list[dict]:
+    pool = await get_pool()
+    rows = await pool.fetch("""
+        SELECT o.id, o.option_text, o.sort_order,
+               COUNT(v.user_id) AS votes
+        FROM poll_options o
+        LEFT JOIN poll_votes v ON v.option_id = o.id AND v.poll_id = o.poll_id
+        WHERE o.poll_id = $1
+        GROUP BY o.id, o.option_text, o.sort_order
+        ORDER BY o.sort_order
+    """, poll_id)
+    return [_record_to_dict(r) for r in rows]
+
+
+async def vote_poll(poll_id: int, user_id: int, option_id: int):
+    pool = await get_pool()
+    await pool.execute("""
+        INSERT INTO poll_votes (poll_id, user_id, option_id, voted_at)
+        VALUES ($1, $2, $3, $4)
+        ON CONFLICT (poll_id, user_id) DO UPDATE SET option_id = $3, voted_at = $4
+    """, poll_id, user_id, option_id, now_msk().isoformat())
+
+
+async def get_user_poll_vote(poll_id: int, user_id: int) -> int | None:
+    pool = await get_pool()
+    return await pool.fetchval(
+        "SELECT option_id FROM poll_votes WHERE poll_id=$1 AND user_id=$2",
+        poll_id, user_id)
+
+
+async def close_poll(poll_id: int):
+    pool = await get_pool()
+    await pool.execute("UPDATE polls SET status = 'closed' WHERE id = $1", poll_id)
+
+
+async def get_active_polls() -> list[dict]:
+    pool = await get_pool()
+    rows = await pool.fetch(
+        "SELECT * FROM polls WHERE status = 'active' ORDER BY created_at DESC")
+    return [_record_to_dict(r) for r in rows]
+
+
+async def get_expiring_polls() -> list[dict]:
+    pool = await get_pool()
+    rows = await pool.fetch("""
+        SELECT * FROM polls
+        WHERE status = 'active' AND ends_at IS NOT NULL AND ends_at <= $1
+    """, now_msk().isoformat())
+    return [_record_to_dict(r) for r in rows]
+
+
+async def count_poll_votes(poll_id: int) -> int:
+    pool = await get_pool()
+    return await pool.fetchval(
+        "SELECT COUNT(*) FROM poll_votes WHERE poll_id = $1", poll_id) or 0
+
+
+# ═══════════════════════════════════════════════
+# Server Monitor
+# ═══════════════════════════════════════════════
+
+async def log_server_status(online_count: int):
+    pool = await get_pool()
+    await pool.execute(
+        "INSERT INTO server_status_log (online_count, recorded_at) VALUES ($1, $2)",
+        online_count, now_msk().isoformat())
+
+
+async def get_server_status_current() -> dict | None:
+    pool = await get_pool()
+    row = await pool.fetchrow(
+        "SELECT * FROM server_status_log ORDER BY recorded_at DESC LIMIT 1")
+    return _record_to_dict(row) if row else None
+
+
+async def get_server_peak_today() -> int:
+    pool = await get_pool()
+    today = now_msk().strftime("%Y-%m-%d")
+    val = await pool.fetchval(
+        "SELECT MAX(online_count) FROM server_status_log WHERE recorded_at >= $1",
+        today)
+    return val or 0
+
+
+async def get_server_downtime_minutes() -> int:
+    pool = await get_pool()
+    rows = await pool.fetch("""
+        SELECT online_count FROM server_status_log
+        ORDER BY recorded_at DESC LIMIT 6
+    """)
+    if not rows:
+        return 0
+    count = 0
+    for r in rows:
+        if r["online_count"] == 0:
+            count += 5
+        else:
+            break
+    return count
+
+
+# ═══════════════════════════════════════════════
+# Weekly Top
+# ═══════════════════════════════════════════════
+
+async def compute_weekly_top(stat_name: str, limit: int = 10) -> list[dict]:
+    import json as _json
+    pool = await get_pool()
+    rows = await pool.fetch(
+        "SELECT username, stats_json FROM stats_cache WHERE place = 'public'")
+    entries = []
+    for r in rows:
+        try:
+            data = _json.loads(r["stats_json"])
+            val = data.get(stat_name, 0)
+            entries.append({"username": r["username"], "value": int(val)})
+        except Exception:
+            pass
+    entries.sort(key=lambda x: x["value"], reverse=True)
+    return entries[:limit]
+
+
+async def save_weekly_top(week_start: str, stat_name: str, rankings: list[dict]):
+    import json as _json
+    pool = await get_pool()
+    await pool.execute("""
+        INSERT INTO weekly_tops (week_start, stat_name, rankings_json, created_at)
+        VALUES ($1, $2, $3, $4)
+        ON CONFLICT (week_start, stat_name) DO UPDATE SET rankings_json = $3, created_at = $4
+    """, week_start, stat_name, _json.dumps(rankings, ensure_ascii=False),
+        now_msk().isoformat())
+
+
+async def get_weekly_top(week_start: str, stat_name: str) -> list[dict] | None:
+    import json as _json
+    pool = await get_pool()
+    val = await pool.fetchval(
+        "SELECT rankings_json FROM weekly_tops WHERE week_start=$1 AND stat_name=$2",
+        week_start, stat_name)
+    return _json.loads(val) if val else None
+
+
+async def get_previous_weekly_top(stat_name: str) -> list[dict] | None:
+    import json as _json
+    from datetime import timedelta
+    pool = await get_pool()
+    now = now_msk()
+    prev_monday = (now - timedelta(days=now.weekday() + 7)).strftime("%Y-%m-%d")
+    val = await pool.fetchval(
+        "SELECT rankings_json FROM weekly_tops WHERE week_start=$1 AND stat_name=$2",
+        prev_monday, stat_name)
+    return _json.loads(val) if val else None
+
+
+# ═══════════════════════════════════════════════
+# Giveaways
+# ═══════════════════════════════════════════════
+
+async def create_giveaway(title: str, description: str, prize_text: str,
+                          prize_promo_reward: str | None, winner_count: int,
+                          ends_at: str, created_by: int) -> int:
+    pool = await get_pool()
+    return await pool.fetchval("""
+        INSERT INTO giveaways (title, description, prize_text, prize_promo_reward,
+                               winner_count, ends_at, created_by, created_at)
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8) RETURNING id
+    """, title, description, prize_text, prize_promo_reward,
+        winner_count, ends_at, created_by, now_msk().isoformat())
+
+
+async def get_giveaway(giveaway_id: int) -> dict | None:
+    pool = await get_pool()
+    row = await pool.fetchrow("SELECT * FROM giveaways WHERE id = $1", giveaway_id)
+    return _record_to_dict(row) if row else None
+
+
+async def enter_giveaway(giveaway_id: int, telegram_id: int, username: str) -> bool:
+    pool = await get_pool()
+    try:
+        await pool.execute("""
+            INSERT INTO giveaway_entries (giveaway_id, telegram_id, username, entered_at)
+            VALUES ($1, $2, $3, $4)
+        """, giveaway_id, telegram_id, username, now_msk().isoformat())
+        return True
+    except Exception:
+        return False
+
+
+async def leave_giveaway(giveaway_id: int, telegram_id: int) -> bool:
+    pool = await get_pool()
+    result = await pool.execute(
+        "DELETE FROM giveaway_entries WHERE giveaway_id=$1 AND telegram_id=$2",
+        giveaway_id, telegram_id)
+    return result.split()[-1] != "0"
+
+
+async def count_giveaway_entries(giveaway_id: int) -> int:
+    pool = await get_pool()
+    return await pool.fetchval(
+        "SELECT COUNT(*) FROM giveaway_entries WHERE giveaway_id = $1",
+        giveaway_id) or 0
+
+
+async def is_giveaway_entered(giveaway_id: int, telegram_id: int) -> bool:
+    pool = await get_pool()
+    return bool(await pool.fetchval(
+        "SELECT 1 FROM giveaway_entries WHERE giveaway_id=$1 AND telegram_id=$2",
+        giveaway_id, telegram_id))
+
+
+async def pick_giveaway_winners(giveaway_id: int, count: int) -> list[dict]:
+    pool = await get_pool()
+    rows = await pool.fetch("""
+        SELECT * FROM giveaway_entries
+        WHERE giveaway_id = $1
+        ORDER BY RANDOM() LIMIT $2
+    """, giveaway_id, count)
+    winners = [_record_to_dict(r) for r in rows]
+    for w in winners:
+        await pool.execute(
+            "UPDATE giveaway_entries SET is_winner = TRUE WHERE giveaway_id=$1 AND telegram_id=$2",
+            giveaway_id, w["telegram_id"])
+    await pool.execute(
+        "UPDATE giveaways SET status = 'ended' WHERE id = $1", giveaway_id)
+    return winners
+
+
+async def get_active_giveaways() -> list[dict]:
+    pool = await get_pool()
+    rows = await pool.fetch(
+        "SELECT * FROM giveaways WHERE status = 'active' ORDER BY ends_at")
+    return [_record_to_dict(r) for r in rows]
+
+
+async def get_ending_giveaways() -> list[dict]:
+    pool = await get_pool()
+    rows = await pool.fetch("""
+        SELECT * FROM giveaways
+        WHERE status = 'active' AND ends_at <= $1
+    """, now_msk().isoformat())
+    return [_record_to_dict(r) for r in rows]
+
+
+async def generate_winner_code(telegram_id: int, reward_text: str,
+                               roblox_reward_data: str, created_by: int) -> str:
+    import secrets
+    code = f"WIN-{secrets.token_hex(4).upper()}"
+    while await get_promo_code(code):
+        code = f"WIN-{secrets.token_hex(4).upper()}"
+    await create_promo_code(
+        code=code, reward_text=reward_text, max_uses=1,
+        expires_at=None, created_by=created_by,
+        telegram_id=telegram_id, roblox_reward_data=roblox_reward_data,
+    )
+    return code

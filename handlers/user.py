@@ -24,6 +24,12 @@ from database import (
     get_player_matches, get_player_leaderboard, link_player_telegram,
     subscribe_news, unsubscribe_news, is_news_subscriber,
     link_telegram_roblox, get_linked_roblox_username, get_stats_cache,
+    redeem_promo_code,
+    get_faq_categories, get_faqs_by_category, get_faq, count_faqs,
+    get_active_polls, get_poll, get_poll_results, vote_poll, get_user_poll_vote, count_poll_votes,
+    get_server_status_current, get_server_peak_today,
+    compute_weekly_top, get_weekly_top, get_previous_weekly_top, save_weekly_top,
+    get_active_giveaways, get_giveaway, enter_giveaway, leave_giveaway, count_giveaway_entries, is_giveaway_entered,
 )
 from keyboards.inline import (
     main_menu_kb, skip_photo_kb, photo_progress_kb, confirm_task_kb,
@@ -31,6 +37,11 @@ from keyboards.inline import (
     user_task_view_kb_with_vote, duplicate_found_kb,
     fix_confirm_kb, lang_select_kb, feed_card_kb,
     player_stats_kb, leaderboard_kb,
+    faq_categories_kb, faq_list_kb, faq_view_kb,
+    poll_vote_kb,
+    server_status_kb,
+    weekly_top_kb,
+    giveaway_user_kb,
 )
 from texts import t
 
@@ -117,6 +128,10 @@ class LinkRoblox(StatesGroup):
 
 class StatsLookup(StatesGroup):
     waiting_username = State()
+
+
+class RedeemCode(StatesGroup):
+    waiting_code = State()
 
 
 # ─── /start ───
@@ -1300,3 +1315,453 @@ async def process_link_roblox(message: Message, state: FSMContext):
         reply_markup=back_to_menu_kb(lang),
         parse_mode="Markdown",
     )
+
+
+# ─── Promo Redeem ───
+
+@router.message(Command("redeem"))
+async def cmd_redeem(message: Message, state: FSMContext):
+    lang = await get_user_lang(message.from_user.id)
+    args = (message.text or "").split(maxsplit=1)
+    await _safe_delete(message)
+    if len(args) > 1:
+        code = args[1].strip()
+        result = await redeem_promo_code(code, message.from_user.id)
+        if result["ok"]:
+            await message.answer(t("promo_success", lang, reward=result["reward"]))
+        else:
+            key = f"promo_{result['error']}"
+            await message.answer(t(key, lang))
+        return
+    await state.set_state(RedeemCode.waiting_code)
+    prompt = await message.answer(t("promo_enter_code", lang))
+    await state.update_data(_prompt_msg_id=prompt.message_id)
+
+
+@router.callback_query(F.data == "redeem:start")
+async def cb_redeem_start(callback: CallbackQuery, state: FSMContext):
+    lang = await get_user_lang(callback.from_user.id)
+    await state.set_state(RedeemCode.waiting_code)
+    try:
+        await callback.message.edit_text(t("promo_enter_code", lang))
+    except Exception:
+        await callback.message.answer(t("promo_enter_code", lang))
+    await callback.answer()
+
+
+@router.message(RedeemCode.waiting_code)
+async def process_redeem_code(message: Message, state: FSMContext):
+    lang = await get_user_lang(message.from_user.id)
+    code = (message.text or "").strip()
+    await _del_bot_prompt(message, state)
+    await _safe_delete(message)
+    await state.clear()
+    if not code:
+        await message.answer(t("promo_not_found", lang))
+        return
+    result = await redeem_promo_code(code, message.from_user.id)
+    if result["ok"]:
+        await message.answer(t("promo_success", lang, reward=result["reward"]),
+                             reply_markup=back_to_menu_kb(lang))
+    else:
+        key = f"promo_{result['error']}"
+        await message.answer(t(key, lang), reply_markup=back_to_menu_kb(lang))
+
+
+# ─── FAQ User ───
+
+@router.message(Command("faq"))
+async def cmd_faq(message: Message):
+    lang = await get_user_lang(message.from_user.id)
+    await _safe_delete(message)
+    categories = await get_faq_categories()
+    if not categories:
+        await message.answer(t("faq_empty", lang), reply_markup=back_to_menu_kb(lang))
+        return
+    await message.answer(t("faq_title", lang), reply_markup=faq_categories_kb(categories, lang),
+                         parse_mode="Markdown")
+
+
+@router.callback_query(F.data == "faq:categories")
+async def cb_faq_categories(callback: CallbackQuery):
+    lang = await get_user_lang(callback.from_user.id)
+    categories = await get_faq_categories()
+    if not categories:
+        await callback.message.edit_text(t("faq_empty", lang), reply_markup=back_to_menu_kb(lang))
+        await callback.answer()
+        return
+    await callback.message.edit_text(t("faq_title", lang),
+                                      reply_markup=faq_categories_kb(categories, lang),
+                                      parse_mode="Markdown")
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("faq:cat:"))
+async def cb_faq_category(callback: CallbackQuery):
+    lang = await get_user_lang(callback.from_user.id)
+    parts = callback.data.split(":")
+    category = parts[2]
+    offset = int(parts[3])
+    page_size = 5
+    faqs = await get_faqs_by_category(category)
+    total = len(faqs)
+    page_faqs = faqs[offset:offset + page_size]
+    if not page_faqs:
+        await callback.message.edit_text(t("faq_cat_empty", lang),
+                                          reply_markup=faq_categories_kb(await get_faq_categories(), lang))
+        await callback.answer()
+        return
+    await callback.message.edit_text(
+        f"❓ **FAQ: {category}** ({offset + 1}-{min(offset + page_size, total)} из {total})",
+        reply_markup=faq_list_kb(page_faqs, category, offset, total, lang, page_size),
+        parse_mode="Markdown",
+    )
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("faq:view:"))
+async def cb_faq_view(callback: CallbackQuery):
+    lang = await get_user_lang(callback.from_user.id)
+    faq_id = int(callback.data.split(":")[2])
+    faq = await get_faq(faq_id)
+    if not faq:
+        await callback.answer("❌ Не найдено", show_alert=True)
+        return
+    await callback.message.edit_text(
+        t("faq_entry", lang, question=faq["question"], answer=faq["answer"]),
+        reply_markup=faq_view_kb(faq_id, faq["category"], lang),
+        parse_mode="Markdown",
+    )
+    await callback.answer()
+
+
+# ─── Polls User ───
+
+@router.message(Command("polls"))
+async def cmd_polls(message: Message):
+    lang = await get_user_lang(message.from_user.id)
+    await _safe_delete(message)
+    polls = await get_active_polls()
+    if not polls:
+        await message.answer(t("poll_no_active", lang), reply_markup=back_to_menu_kb(lang))
+        return
+    # Show first active poll
+    await _show_poll(message, polls[0]["id"], lang)
+
+
+@router.callback_query(F.data.startswith("poll:list:"))
+async def cb_poll_list(callback: CallbackQuery):
+    lang = await get_user_lang(callback.from_user.id)
+    polls = await get_active_polls()
+    if not polls:
+        await callback.message.edit_text(t("poll_no_active", lang), reply_markup=back_to_menu_kb(lang))
+        await callback.answer()
+        return
+    await _show_poll_cb(callback, polls[0]["id"], lang)
+
+
+@router.callback_query(F.data.startswith("poll:vote:"))
+async def cb_poll_vote(callback: CallbackQuery):
+    lang = await get_user_lang(callback.from_user.id)
+    parts = callback.data.split(":")
+    poll_id = int(parts[2])
+    option_id = int(parts[3])
+    poll = await get_poll(poll_id)
+    if not poll or poll["status"] != "active":
+        await callback.answer(t("poll_closed", lang), show_alert=True)
+        return
+    old_vote = await get_user_poll_vote(poll_id, callback.from_user.id)
+    await vote_poll(poll_id, callback.from_user.id, option_id)
+    results = await get_poll_results(poll_id)
+    opt_text = next((r["option_text"] for r in results if r["id"] == option_id), "?")
+    if old_vote and old_vote != option_id:
+        await callback.answer(t("poll_changed", lang, option=opt_text))
+    else:
+        await callback.answer(t("poll_voted", lang, option=opt_text))
+    user_vote = await get_user_poll_vote(poll_id, callback.from_user.id)
+    try:
+        await callback.message.edit_text(
+            t("poll_question", lang, question=poll["question"]),
+            reply_markup=poll_vote_kb(poll_id, results, user_vote),
+            parse_mode="Markdown",
+        )
+    except Exception:
+        pass
+
+
+async def _show_poll(message: Message, poll_id: int, lang: str):
+    poll = await get_poll(poll_id)
+    results = await get_poll_results(poll_id)
+    user_vote = await get_user_poll_vote(poll_id, message.chat.id)
+    closed = poll["status"] != "active"
+    await message.answer(
+        t("poll_question", lang, question=poll["question"]),
+        reply_markup=poll_vote_kb(poll_id, results, user_vote, closed),
+        parse_mode="Markdown",
+    )
+
+
+async def _show_poll_cb(callback: CallbackQuery, poll_id: int, lang: str):
+    poll = await get_poll(poll_id)
+    results = await get_poll_results(poll_id)
+    user_vote = await get_user_poll_vote(poll_id, callback.from_user.id)
+    closed = poll["status"] != "active"
+    try:
+        await callback.message.edit_text(
+            t("poll_question", lang, question=poll["question"]),
+            reply_markup=poll_vote_kb(poll_id, results, user_vote, closed),
+            parse_mode="Markdown",
+        )
+    except Exception:
+        pass
+    await callback.answer()
+
+
+# ─── Server Status ───
+
+@router.message(Command("server"))
+async def cmd_server(message: Message):
+    lang = await get_user_lang(message.from_user.id)
+    await _safe_delete(message)
+    await _show_server(message, lang)
+
+
+@router.callback_query(F.data == "server:status")
+async def cb_server_status(callback: CallbackQuery):
+    lang = await get_user_lang(callback.from_user.id)
+    current = await get_server_status_current()
+    peak = await get_server_peak_today()
+    online = current["online_count"] if current else 0
+    status_emoji = "🟢" if online > 0 else "🔴"
+    time_str = current["recorded_at"][:16].replace("T", " ") if current else "—"
+    try:
+        await callback.message.edit_text(
+            t("server_status", lang, status=status_emoji, online=online, peak=peak, time=time_str),
+            reply_markup=server_status_kb(lang),
+            parse_mode="Markdown",
+        )
+    except Exception:
+        pass
+    await callback.answer()
+
+
+async def _show_server(message: Message, lang: str):
+    current = await get_server_status_current()
+    peak = await get_server_peak_today()
+    online = current["online_count"] if current else 0
+    status_emoji = "🟢" if online > 0 else "🔴"
+    time_str = current["recorded_at"][:16].replace("T", " ") if current else "—"
+    await message.answer(
+        t("server_status", lang, status=status_emoji, online=online, peak=peak, time=time_str),
+        reply_markup=server_status_kb(lang),
+        parse_mode="Markdown",
+    )
+
+
+# ─── Weekly Top ───
+
+@router.message(Command("weeklytop"))
+async def cmd_weeklytop(message: Message):
+    lang = await get_user_lang(message.from_user.id)
+    await _safe_delete(message)
+    await _show_weekly_top(message, "wins", lang)
+
+
+@router.callback_query(F.data == "weeklytop:view")
+async def cb_weeklytop_view(callback: CallbackQuery):
+    lang = await get_user_lang(callback.from_user.id)
+    await _show_weekly_top_cb(callback, "wins", lang)
+
+
+@router.callback_query(F.data.startswith("weeklytop:stat:"))
+async def cb_weeklytop_stat(callback: CallbackQuery):
+    lang = await get_user_lang(callback.from_user.id)
+    stat = callback.data.split(":")[2]
+    await _show_weekly_top_cb(callback, stat, lang)
+
+
+async def _show_weekly_top(message: Message, stat_name: str, lang: str):
+    from datetime import timedelta
+    now = __import__("database").now_msk()
+    week_start = (now - timedelta(days=now.weekday())).strftime("%Y-%m-%d")
+    top = await get_weekly_top(week_start, stat_name)
+    if not top:
+        top = await compute_weekly_top(stat_name, 10)
+        if top:
+            await save_weekly_top(week_start, stat_name, top)
+    if not top:
+        await message.answer(t("weekly_top_empty", lang), reply_markup=weekly_top_kb(stat_name, lang))
+        return
+    stat_labels = {"wins": "🏆 Победы", "money": "💰 Монеты", "timePlayed": "⏰ Время"}
+    prev = await get_previous_weekly_top(stat_name)
+    prev_map = {}
+    if prev:
+        for i, p in enumerate(prev):
+            prev_map[p["username"].lower()] = i + 1
+    text = t("weekly_top_title", lang, stat=stat_labels.get(stat_name, stat_name), week=week_start)
+    medals = ["🥇", "🥈", "🥉"]
+    for i, entry in enumerate(top):
+        pos = medals[i] if i < 3 else f"{i + 1}."
+        val = entry["value"]
+        if stat_name == "timePlayed":
+            val = f"{val // 3600}ч {(val % 3600) // 60}м"
+        elif stat_name == "money":
+            val = f"{val:,}"
+        arrow = ""
+        prev_pos = prev_map.get(entry["username"].lower())
+        if prev_pos:
+            diff = prev_pos - (i + 1)
+            if diff > 0:
+                arrow = f"(↑{diff})"
+            elif diff < 0:
+                arrow = f"(↓{abs(diff)})"
+        else:
+            arrow = "(new)"
+        text += t("weekly_top_line", lang, pos=pos, name=entry["username"], value=val, arrow=arrow)
+    await message.answer(text, reply_markup=weekly_top_kb(stat_name, lang), parse_mode="Markdown")
+
+
+async def _show_weekly_top_cb(callback: CallbackQuery, stat_name: str, lang: str):
+    from datetime import timedelta
+    now = __import__("database").now_msk()
+    week_start = (now - timedelta(days=now.weekday())).strftime("%Y-%m-%d")
+    top = await get_weekly_top(week_start, stat_name)
+    if not top:
+        top = await compute_weekly_top(stat_name, 10)
+        if top:
+            await save_weekly_top(week_start, stat_name, top)
+    if not top:
+        try:
+            await callback.message.edit_text(t("weekly_top_empty", lang),
+                                              reply_markup=weekly_top_kb(stat_name, lang))
+        except Exception:
+            pass
+        await callback.answer()
+        return
+    stat_labels = {"wins": "🏆 Победы", "money": "💰 Монеты", "timePlayed": "⏰ Время"}
+    prev = await get_previous_weekly_top(stat_name)
+    prev_map = {}
+    if prev:
+        for i, p in enumerate(prev):
+            prev_map[p["username"].lower()] = i + 1
+    text = t("weekly_top_title", lang, stat=stat_labels.get(stat_name, stat_name), week=week_start)
+    medals = ["🥇", "🥈", "🥉"]
+    for i, entry in enumerate(top):
+        pos = medals[i] if i < 3 else f"{i + 1}."
+        val = entry["value"]
+        if stat_name == "timePlayed":
+            val = f"{val // 3600}ч {(val % 3600) // 60}м"
+        elif stat_name == "money":
+            val = f"{val:,}"
+        arrow = ""
+        prev_pos = prev_map.get(entry["username"].lower())
+        if prev_pos:
+            diff = prev_pos - (i + 1)
+            if diff > 0:
+                arrow = f"(↑{diff})"
+            elif diff < 0:
+                arrow = f"(↓{abs(diff)})"
+        else:
+            arrow = "(new)"
+        text += t("weekly_top_line", lang, pos=pos, name=entry["username"], value=val, arrow=arrow)
+    try:
+        await callback.message.edit_text(text, reply_markup=weekly_top_kb(stat_name, lang),
+                                          parse_mode="Markdown")
+    except Exception:
+        pass
+    await callback.answer()
+
+
+# ─── Giveaways User ───
+
+@router.message(Command("giveaways"))
+async def cmd_giveaways(message: Message):
+    lang = await get_user_lang(message.from_user.id)
+    await _safe_delete(message)
+    giveaways = await get_active_giveaways()
+    if not giveaways:
+        await message.answer(t("giveaway_no_active", lang), reply_markup=back_to_menu_kb(lang))
+        return
+    g = giveaways[0]
+    count = await count_giveaway_entries(g["id"])
+    entered = await is_giveaway_entered(g["id"], message.from_user.id)
+    end_time = g["ends_at"][:16].replace("T", " ") if g["ends_at"] else "—"
+    await message.answer(
+        t("giveaway_card", lang, title=g["title"], description=g["description"],
+          prize=g["prize_text"], count=count, end_time=end_time, winners=g["winner_count"]),
+        reply_markup=giveaway_user_kb(g["id"], entered, count, lang),
+        parse_mode="Markdown",
+    )
+
+
+@router.callback_query(F.data.startswith("giveaway:list:"))
+async def cb_giveaway_list(callback: CallbackQuery):
+    lang = await get_user_lang(callback.from_user.id)
+    giveaways = await get_active_giveaways()
+    if not giveaways:
+        await callback.message.edit_text(t("giveaway_no_active", lang), reply_markup=back_to_menu_kb(lang))
+        await callback.answer()
+        return
+    g = giveaways[0]
+    count = await count_giveaway_entries(g["id"])
+    entered = await is_giveaway_entered(g["id"], callback.from_user.id)
+    end_time = g["ends_at"][:16].replace("T", " ") if g["ends_at"] else "—"
+    try:
+        await callback.message.edit_text(
+            t("giveaway_card", lang, title=g["title"], description=g["description"],
+              prize=g["prize_text"], count=count, end_time=end_time, winners=g["winner_count"]),
+            reply_markup=giveaway_user_kb(g["id"], entered, count, lang),
+            parse_mode="Markdown",
+        )
+    except Exception:
+        pass
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("giveaway:join:"))
+async def cb_giveaway_join(callback: CallbackQuery):
+    lang = await get_user_lang(callback.from_user.id)
+    giveaway_id = int(callback.data.split(":")[2])
+    g = await get_giveaway(giveaway_id)
+    if not g or g["status"] != "active":
+        await callback.answer("❌ Розыгрыш завершён", show_alert=True)
+        return
+    username = callback.from_user.username or callback.from_user.full_name
+    entered = await enter_giveaway(giveaway_id, callback.from_user.id, username)
+    if entered:
+        await callback.answer(t("giveaway_joined", lang))
+    else:
+        await callback.answer("Вы уже участвуете")
+    count = await count_giveaway_entries(giveaway_id)
+    end_time = g["ends_at"][:16].replace("T", " ") if g["ends_at"] else "—"
+    try:
+        await callback.message.edit_text(
+            t("giveaway_card", lang, title=g["title"], description=g["description"],
+              prize=g["prize_text"], count=count, end_time=end_time, winners=g["winner_count"]),
+            reply_markup=giveaway_user_kb(giveaway_id, True, count, lang),
+            parse_mode="Markdown",
+        )
+    except Exception:
+        pass
+
+
+@router.callback_query(F.data.startswith("giveaway:leave:"))
+async def cb_giveaway_leave(callback: CallbackQuery):
+    lang = await get_user_lang(callback.from_user.id)
+    giveaway_id = int(callback.data.split(":")[2])
+    await leave_giveaway(giveaway_id, callback.from_user.id)
+    await callback.answer(t("giveaway_left", lang))
+    g = await get_giveaway(giveaway_id)
+    if not g:
+        return
+    count = await count_giveaway_entries(giveaway_id)
+    end_time = g["ends_at"][:16].replace("T", " ") if g["ends_at"] else "—"
+    try:
+        await callback.message.edit_text(
+            t("giveaway_card", lang, title=g["title"], description=g["description"],
+              prize=g["prize_text"], count=count, end_time=end_time, winners=g["winner_count"]),
+            reply_markup=giveaway_user_kb(giveaway_id, False, count, lang),
+            parse_mode="Markdown",
+        )
+    except Exception:
+        pass

@@ -25,6 +25,10 @@ from database import (
     add_admin_log, get_admin_log,
     link_tasks, get_linked_tasks,
     get_dashboard_stats, bulk_update_status,
+    create_promo_code, list_promo_codes, count_promo_codes, deactivate_promo_code, get_promo_code,
+    create_faq, get_faq, delete_faq, get_faq_categories, get_faqs_by_category, count_faqs,
+    create_poll, get_poll, get_poll_results, close_poll, get_active_polls, get_expiring_polls,
+    create_giveaway, get_giveaway, get_active_giveaways, pick_giveaway_winners, count_giveaway_entries, generate_winner_code,
 )
 from keyboards.inline import (
     admin_main_kb, admin_task_kb, task_list_kb, notify_settings_kb,
@@ -33,6 +37,10 @@ from keyboards.inline import (
     admin_moderation_kb, ban_duration_kb,
     bulk_status_kb, link_duplicate_kb,
     news_confirm_kb,
+    promo_admin_kb, promo_list_kb, promo_view_kb,
+    faq_admin_kb, faq_admin_entry_kb,
+    poll_admin_kb, poll_admin_view_kb, poll_vote_kb,
+    giveaway_admin_kb, giveaway_admin_view_kb,
 )
 from texts import t
 from middlewares.throttle import invalidate_admin_cache
@@ -138,6 +146,33 @@ class AdminNews(StatesGroup):
     waiting_content = State()
     waiting_link = State()
     waiting_target_id = State()
+
+
+class AdminPromo(StatesGroup):
+    waiting_code = State()
+    waiting_reward = State()
+    waiting_max_uses = State()
+    waiting_expiry = State()
+
+
+class AdminFAQ(StatesGroup):
+    waiting_category = State()
+    waiting_question = State()
+    waiting_answer = State()
+
+
+class AdminPoll(StatesGroup):
+    waiting_question = State()
+    waiting_options = State()
+    waiting_end_time = State()
+
+
+class AdminGiveaway(StatesGroup):
+    waiting_title = State()
+    waiting_description = State()
+    waiting_prize = State()
+    waiting_winner_count = State()
+    waiting_end_time = State()
 
 
 # ─── Команда /admin ───
@@ -2083,4 +2118,683 @@ async def cb_news_cancel(callback: CallbackQuery, state: FSMContext):
             pass
     await state.clear()
     await callback.message.edit_text(t("news_cancel", "ru"))
+    await callback.answer()
+
+
+# ─── Promo codes admin ───
+
+@router.callback_query(F.data == "adm:promo")
+async def cb_promo_menu(callback: CallbackQuery, state: FSMContext):
+    if not await is_admin(callback.from_user.id):
+        await callback.answer("⛔ Нет доступа", show_alert=True)
+        return
+    await state.clear()
+    await callback.message.edit_text("🎟 Управление промокодами:", reply_markup=promo_admin_kb())
+    await callback.answer()
+
+
+@router.callback_query(F.data == "adm:promo_create")
+async def cb_promo_create(callback: CallbackQuery, state: FSMContext):
+    if not await is_admin(callback.from_user.id):
+        await callback.answer("⛔ Нет доступа", show_alert=True)
+        return
+    await state.set_state(AdminPromo.waiting_code)
+    await callback.message.edit_text("🎟 Введите код промокода (например: SUMMER2026):")
+    await callback.answer()
+
+
+@router.message(AdminPromo.waiting_code)
+async def process_promo_code(message: Message, state: FSMContext):
+    code = (message.text or "").strip().upper()
+    if not code or len(code) > 30:
+        err = await message.answer("❌ Код должен быть 1-30 символов.")
+        await _safe_delete(message)
+        asyncio.create_task(_auto_delete(err))
+        return
+    existing = await get_promo_code(code)
+    if existing:
+        err = await message.answer("❌ Такой код уже существует.")
+        await _safe_delete(message)
+        asyncio.create_task(_auto_delete(err))
+        return
+    await _safe_delete(message)
+    await state.update_data(promo_code=code)
+    await state.set_state(AdminPromo.waiting_reward)
+    prompt = await message.answer(f"✅ Код: `{code}`\n\n📝 Введите описание награды:", parse_mode="Markdown")
+    await state.update_data(_prompt_msg_id=prompt.message_id)
+
+
+@router.message(AdminPromo.waiting_reward)
+async def process_promo_reward(message: Message, state: FSMContext):
+    reward = (message.text or "").strip()
+    if not reward:
+        err = await message.answer("❌ Введите описание награды.")
+        await _safe_delete(message)
+        asyncio.create_task(_auto_delete(err))
+        return
+    await _del_bot_prompt(message, state)
+    await _safe_delete(message)
+    await state.update_data(promo_reward=reward)
+    await state.set_state(AdminPromo.waiting_max_uses)
+    prompt = await message.answer("🔢 Максимум активаций (число, например 100):")
+    await state.update_data(_prompt_msg_id=prompt.message_id)
+
+
+@router.message(AdminPromo.waiting_max_uses)
+async def process_promo_max_uses(message: Message, state: FSMContext):
+    try:
+        max_uses = int(message.text.strip())
+        if max_uses < 1:
+            raise ValueError
+    except (ValueError, AttributeError):
+        err = await message.answer("❌ Введите положительное число.")
+        await _safe_delete(message)
+        asyncio.create_task(_auto_delete(err))
+        return
+    await _del_bot_prompt(message, state)
+    await _safe_delete(message)
+    await state.update_data(promo_max_uses=max_uses)
+    await state.set_state(AdminPromo.waiting_expiry)
+    prompt = await message.answer("📅 Дата истечения (ДД.ММ.ГГГГ) или /skip:")
+    await state.update_data(_prompt_msg_id=prompt.message_id)
+
+
+@router.message(AdminPromo.waiting_expiry)
+async def process_promo_expiry(message: Message, state: FSMContext):
+    text = (message.text or "").strip()
+    expires_at = None
+    if text != "/skip":
+        from datetime import datetime as dt
+        try:
+            expires_at = dt.strptime(text, "%d.%m.%Y").isoformat()
+        except ValueError:
+            err = await message.answer("❌ Формат: ДД.ММ.ГГГГ или /skip")
+            await _safe_delete(message)
+            asyncio.create_task(_auto_delete(err))
+            return
+    await _del_bot_prompt(message, state)
+    await _safe_delete(message)
+    data = await state.get_data()
+    await state.clear()
+    code_id = await create_promo_code(
+        code=data["promo_code"],
+        reward_text=data["promo_reward"],
+        max_uses=data["promo_max_uses"],
+        expires_at=expires_at,
+        created_by=message.from_user.id,
+    )
+    await message.answer(
+        f"✅ Промокод `{data['promo_code']}` создан!\n"
+        f"Награда: {data['promo_reward']}\n"
+        f"Макс. активаций: {data['promo_max_uses']}\n"
+        f"Истекает: {text if text != '/skip' else 'никогда'}",
+        reply_markup=promo_admin_kb(),
+        parse_mode="Markdown",
+    )
+
+
+@router.callback_query(F.data.startswith("adm:promo_list:"))
+async def cb_promo_list(callback: CallbackQuery, state: FSMContext):
+    if not await is_admin(callback.from_user.id):
+        await callback.answer("⛔ Нет доступа", show_alert=True)
+        return
+    await state.clear()
+    offset = int(callback.data.split(":")[2])
+    page_size = 5
+    promos = await list_promo_codes(limit=page_size, offset=offset)
+    total = await count_promo_codes()
+    if not promos:
+        await callback.message.edit_text("📭 Промокодов нет.", reply_markup=promo_admin_kb())
+        await callback.answer()
+        return
+    await callback.message.edit_text(
+        f"🎟 Промокоды ({offset + 1}-{min(offset + page_size, total)} из {total}):",
+        reply_markup=promo_list_kb(promos, offset, total, page_size),
+    )
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("adm:promo_view:"))
+async def cb_promo_view(callback: CallbackQuery):
+    if not await is_admin(callback.from_user.id):
+        await callback.answer("⛔ Нет доступа", show_alert=True)
+        return
+    code_id = int(callback.data.split(":")[2])
+    from database import get_pool, _record_to_dict
+    pool = await get_pool()
+    row = await pool.fetchrow("SELECT * FROM promo_codes WHERE id = $1", code_id)
+    if not row:
+        await callback.answer("❌ Не найден", show_alert=True)
+        return
+    p = _record_to_dict(row)
+    status = "✅ Активен" if p["active"] else "❌ Неактивен"
+    exp = p["expires_at"][:10] if p["expires_at"] else "никогда"
+    personal = f"\n👤 Персональный: ID {p['telegram_id']}" if p["telegram_id"] else ""
+    text = (
+        f"🎟 **Промокод: {p['code']}**\n\n"
+        f"📝 Награда: {p['reward_text']}\n"
+        f"📊 Использований: {p['used_count']}/{p['max_uses']}\n"
+        f"📅 Истекает: {exp}\n"
+        f"Статус: {status}{personal}"
+    )
+    await callback.message.edit_text(text, reply_markup=promo_view_kb(code_id), parse_mode="Markdown")
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("adm:promo_deactivate:"))
+async def cb_promo_deactivate(callback: CallbackQuery):
+    if not await is_admin(callback.from_user.id):
+        await callback.answer("⛔ Нет доступа", show_alert=True)
+        return
+    code_id = int(callback.data.split(":")[2])
+    await deactivate_promo_code(code_id)
+    await callback.message.edit_text("✅ Промокод деактивирован.", reply_markup=promo_admin_kb())
+    await callback.answer()
+
+
+# ─── FAQ admin ───
+
+@router.callback_query(F.data == "adm:faq")
+async def cb_faq_admin_menu(callback: CallbackQuery, state: FSMContext):
+    if not await is_admin(callback.from_user.id):
+        await callback.answer("⛔ Нет доступа", show_alert=True)
+        return
+    await state.clear()
+    total = await count_faqs()
+    await callback.message.edit_text(f"❓ FAQ ({total} записей):", reply_markup=faq_admin_kb())
+    await callback.answer()
+
+
+@router.callback_query(F.data == "adm:faq_create")
+async def cb_faq_create(callback: CallbackQuery, state: FSMContext):
+    if not await is_admin(callback.from_user.id):
+        await callback.answer("⛔ Нет доступа", show_alert=True)
+        return
+    await state.set_state(AdminFAQ.waiting_category)
+    await callback.message.edit_text("📁 Введите категорию (например: Геймплей, Баги, Общее):")
+    await callback.answer()
+
+
+@router.message(AdminFAQ.waiting_category)
+async def process_faq_category(message: Message, state: FSMContext):
+    cat = (message.text or "").strip()
+    if not cat or len(cat) > 50:
+        err = await message.answer("❌ Категория 1-50 символов.")
+        await _safe_delete(message)
+        asyncio.create_task(_auto_delete(err))
+        return
+    await _safe_delete(message)
+    await state.update_data(faq_category=cat)
+    await state.set_state(AdminFAQ.waiting_question)
+    prompt = await message.answer(f"📁 Категория: {cat}\n\n❓ Введите вопрос:")
+    await state.update_data(_prompt_msg_id=prompt.message_id)
+
+
+@router.message(AdminFAQ.waiting_question)
+async def process_faq_question(message: Message, state: FSMContext):
+    q = (message.text or "").strip()
+    if not q:
+        err = await message.answer("❌ Введите вопрос.")
+        await _safe_delete(message)
+        asyncio.create_task(_auto_delete(err))
+        return
+    await _del_bot_prompt(message, state)
+    await _safe_delete(message)
+    await state.update_data(faq_question=q)
+    await state.set_state(AdminFAQ.waiting_answer)
+    prompt = await message.answer(f"❓ {q}\n\n📝 Введите ответ:")
+    await state.update_data(_prompt_msg_id=prompt.message_id)
+
+
+@router.message(AdminFAQ.waiting_answer)
+async def process_faq_answer(message: Message, state: FSMContext):
+    a = (message.text or "").strip()
+    if not a:
+        err = await message.answer("❌ Введите ответ.")
+        await _safe_delete(message)
+        asyncio.create_task(_auto_delete(err))
+        return
+    await _del_bot_prompt(message, state)
+    await _safe_delete(message)
+    data = await state.get_data()
+    await state.clear()
+    faq_id = await create_faq(
+        category=data["faq_category"],
+        question=data["faq_question"],
+        answer=a,
+        created_by=message.from_user.id,
+    )
+    await message.answer(f"✅ FAQ #{faq_id} создан!", reply_markup=faq_admin_kb())
+
+
+@router.callback_query(F.data.startswith("adm:faq_list:"))
+async def cb_faq_admin_list(callback: CallbackQuery, state: FSMContext):
+    if not await is_admin(callback.from_user.id):
+        await callback.answer("⛔ Нет доступа", show_alert=True)
+        return
+    await state.clear()
+    categories = await get_faq_categories()
+    if not categories:
+        await callback.message.edit_text("📭 FAQ пуст.", reply_markup=faq_admin_kb())
+        await callback.answer()
+        return
+    # Show all FAQs grouped by category
+    from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
+    buttons = []
+    for cat in categories:
+        faqs = await get_faqs_by_category(cat)
+        for f in faqs:
+            short = f["question"][:35] + ("..." if len(f["question"]) > 35 else "")
+            buttons.append([InlineKeyboardButton(
+                text=f"[{cat}] #{f['id']}: {short}",
+                callback_data=f"adm:faq_view:{f['id']}",
+            )])
+    buttons.append([InlineKeyboardButton(text="◀️ Назад", callback_data="adm:faq")])
+    await callback.message.edit_text("❓ Все FAQ записи:", reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons))
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("adm:faq_view:"))
+async def cb_faq_admin_view(callback: CallbackQuery):
+    if not await is_admin(callback.from_user.id):
+        await callback.answer("⛔ Нет доступа", show_alert=True)
+        return
+    faq_id = int(callback.data.split(":")[2])
+    faq = await get_faq(faq_id)
+    if not faq:
+        await callback.answer("❌ Не найден", show_alert=True)
+        return
+    text = f"❓ **FAQ #{faq_id}**\n📁 {faq['category']}\n\n**Q:** {faq['question']}\n**A:** {faq['answer']}"
+    await callback.message.edit_text(text, reply_markup=faq_admin_entry_kb(faq_id), parse_mode="Markdown")
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("adm:faq_delete:"))
+async def cb_faq_delete(callback: CallbackQuery):
+    if not await is_admin(callback.from_user.id):
+        await callback.answer("⛔ Нет доступа", show_alert=True)
+        return
+    faq_id = int(callback.data.split(":")[2])
+    await delete_faq(faq_id)
+    await callback.message.edit_text(f"✅ FAQ #{faq_id} удалён.", reply_markup=faq_admin_kb())
+    await callback.answer()
+
+
+# ─── Polls admin ───
+
+@router.callback_query(F.data == "adm:poll")
+async def cb_poll_admin_menu(callback: CallbackQuery, state: FSMContext):
+    if not await is_admin(callback.from_user.id):
+        await callback.answer("⛔ Нет доступа", show_alert=True)
+        return
+    await state.clear()
+    await callback.message.edit_text("📊 Управление опросами:", reply_markup=poll_admin_kb())
+    await callback.answer()
+
+
+@router.callback_query(F.data == "adm:poll_create")
+async def cb_poll_create(callback: CallbackQuery, state: FSMContext):
+    if not await is_admin(callback.from_user.id):
+        await callback.answer("⛔ Нет доступа", show_alert=True)
+        return
+    await state.set_state(AdminPoll.waiting_question)
+    await callback.message.edit_text("📊 Введите вопрос опроса:")
+    await callback.answer()
+
+
+@router.message(AdminPoll.waiting_question)
+async def process_poll_question(message: Message, state: FSMContext):
+    q = (message.text or "").strip()
+    if not q:
+        err = await message.answer("❌ Введите вопрос.")
+        await _safe_delete(message)
+        asyncio.create_task(_auto_delete(err))
+        return
+    await _safe_delete(message)
+    await state.update_data(poll_question=q)
+    await state.set_state(AdminPoll.waiting_options)
+    prompt = await message.answer(f"❓ {q}\n\n📋 Введите варианты через запятую (2-6):\nНапример: Да, Нет, Не знаю")
+    await state.update_data(_prompt_msg_id=prompt.message_id)
+
+
+@router.message(AdminPoll.waiting_options)
+async def process_poll_options(message: Message, state: FSMContext):
+    text = (message.text or "").strip()
+    options = [o.strip() for o in text.split(",") if o.strip()]
+    if len(options) < 2:
+        err = await message.answer("❌ Минимум 2 варианта через запятую.")
+        await _safe_delete(message)
+        asyncio.create_task(_auto_delete(err))
+        return
+    if len(options) > 6:
+        err = await message.answer("❌ Максимум 6 вариантов.")
+        await _safe_delete(message)
+        asyncio.create_task(_auto_delete(err))
+        return
+    await _del_bot_prompt(message, state)
+    await _safe_delete(message)
+    await state.update_data(poll_options=options)
+    await state.set_state(AdminPoll.waiting_end_time)
+    prompt = await message.answer("⏰ Когда закрыть? (ДД.ММ.ГГГГ ЧЧ:ММ) или /skip для бессрочного:")
+    await state.update_data(_prompt_msg_id=prompt.message_id)
+
+
+@router.message(AdminPoll.waiting_end_time)
+async def process_poll_end_time(message: Message, state: FSMContext):
+    text = (message.text or "").strip()
+    ends_at = None
+    if text != "/skip":
+        from datetime import datetime as dt
+        try:
+            ends_at = dt.strptime(text, "%d.%m.%Y %H:%M").isoformat()
+        except ValueError:
+            try:
+                ends_at = dt.strptime(text, "%d.%m.%Y").isoformat()
+            except ValueError:
+                err = await message.answer("❌ Формат: ДД.ММ.ГГГГ ЧЧ:ММ или /skip")
+                await _safe_delete(message)
+                asyncio.create_task(_auto_delete(err))
+                return
+    await _del_bot_prompt(message, state)
+    await _safe_delete(message)
+    data = await state.get_data()
+    await state.clear()
+    poll_id = await create_poll(
+        question=data["poll_question"],
+        options=data["poll_options"],
+        ends_at=ends_at,
+        created_by=message.from_user.id,
+    )
+    opts_text = "\n".join(f"  • {o}" for o in data["poll_options"])
+    await message.answer(
+        f"✅ Опрос #{poll_id} создан!\n\n"
+        f"❓ {data['poll_question']}\n{opts_text}\n\n"
+        f"⏰ {'Бессрочный' if not ends_at else f'До: {text}'}",
+        reply_markup=poll_admin_kb(),
+    )
+
+
+@router.callback_query(F.data.startswith("adm:poll_list:"))
+async def cb_poll_admin_list(callback: CallbackQuery, state: FSMContext):
+    if not await is_admin(callback.from_user.id):
+        await callback.answer("⛔ Нет доступа", show_alert=True)
+        return
+    await state.clear()
+    polls = await get_active_polls()
+    if not polls:
+        await callback.message.edit_text("📭 Нет активных опросов.", reply_markup=poll_admin_kb())
+        await callback.answer()
+        return
+    from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
+    buttons = []
+    for p in polls:
+        short = p["question"][:35] + ("..." if len(p["question"]) > 35 else "")
+        buttons.append([InlineKeyboardButton(
+            text=f"📊 #{p['id']}: {short}",
+            callback_data=f"adm:poll_view:{p['id']}",
+        )])
+    buttons.append([InlineKeyboardButton(text="◀️ Назад", callback_data="adm:poll")])
+    await callback.message.edit_text("📊 Активные опросы:", reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons))
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("adm:poll_view:"))
+async def cb_poll_admin_view(callback: CallbackQuery):
+    if not await is_admin(callback.from_user.id):
+        await callback.answer("⛔ Нет доступа", show_alert=True)
+        return
+    poll_id = int(callback.data.split(":")[2])
+    poll = await get_poll(poll_id)
+    if not poll:
+        await callback.answer("❌ Не найден", show_alert=True)
+        return
+    results = await get_poll_results(poll_id)
+    total_votes = sum(r["votes"] for r in results)
+    lines = [f"📊 **Опрос #{poll_id}:** {poll['question']}\n"]
+    lines.append(f"📊 Всего голосов: {total_votes}\n")
+    for r in results:
+        pct = round(r["votes"] / max(total_votes, 1) * 100)
+        filled = round(r["votes"] / max(total_votes, 1) * 10)
+        bar = "█" * filled + "░" * (10 - filled)
+        lines.append(f"{r['option_text']}: {bar} {pct}% ({r['votes']})")
+    await callback.message.edit_text(
+        "\n".join(lines),
+        reply_markup=poll_admin_view_kb(poll_id, poll["status"] == "active"),
+        parse_mode="Markdown",
+    )
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("adm:poll_close:"))
+async def cb_poll_close(callback: CallbackQuery):
+    if not await is_admin(callback.from_user.id):
+        await callback.answer("⛔ Нет доступа", show_alert=True)
+        return
+    poll_id = int(callback.data.split(":")[2])
+    await close_poll(poll_id)
+    await callback.message.edit_text(f"✅ Опрос #{poll_id} закрыт.", reply_markup=poll_admin_kb())
+    await callback.answer()
+
+
+# ─── Giveaways admin ───
+
+@router.callback_query(F.data == "adm:giveaway")
+async def cb_giveaway_admin_menu(callback: CallbackQuery, state: FSMContext):
+    if not await is_admin(callback.from_user.id):
+        await callback.answer("⛔ Нет доступа", show_alert=True)
+        return
+    await state.clear()
+    await callback.message.edit_text("🎁 Управление розыгрышами:", reply_markup=giveaway_admin_kb())
+    await callback.answer()
+
+
+@router.callback_query(F.data == "adm:giveaway_create")
+async def cb_giveaway_create(callback: CallbackQuery, state: FSMContext):
+    if not await is_admin(callback.from_user.id):
+        await callback.answer("⛔ Нет доступа", show_alert=True)
+        return
+    await state.set_state(AdminGiveaway.waiting_title)
+    await callback.message.edit_text("🎁 Введите название розыгрыша:")
+    await callback.answer()
+
+
+@router.message(AdminGiveaway.waiting_title)
+async def process_giveaway_title(message: Message, state: FSMContext):
+    title = (message.text or "").strip()
+    if not title:
+        err = await message.answer("❌ Введите название.")
+        await _safe_delete(message)
+        asyncio.create_task(_auto_delete(err))
+        return
+    await _safe_delete(message)
+    await state.update_data(gw_title=title)
+    await state.set_state(AdminGiveaway.waiting_description)
+    prompt = await message.answer(f"🎁 {title}\n\n📝 Введите описание розыгрыша:")
+    await state.update_data(_prompt_msg_id=prompt.message_id)
+
+
+@router.message(AdminGiveaway.waiting_description)
+async def process_giveaway_desc(message: Message, state: FSMContext):
+    desc = (message.text or "").strip()
+    if not desc:
+        err = await message.answer("❌ Введите описание.")
+        await _safe_delete(message)
+        asyncio.create_task(_auto_delete(err))
+        return
+    await _del_bot_prompt(message, state)
+    await _safe_delete(message)
+    await state.update_data(gw_description=desc)
+    await state.set_state(AdminGiveaway.waiting_prize)
+    prompt = await message.answer("🎖 Введите приз:")
+    await state.update_data(_prompt_msg_id=prompt.message_id)
+
+
+@router.message(AdminGiveaway.waiting_prize)
+async def process_giveaway_prize(message: Message, state: FSMContext):
+    prize = (message.text or "").strip()
+    if not prize:
+        err = await message.answer("❌ Введите приз.")
+        await _safe_delete(message)
+        asyncio.create_task(_auto_delete(err))
+        return
+    await _del_bot_prompt(message, state)
+    await _safe_delete(message)
+    await state.update_data(gw_prize=prize)
+    await state.set_state(AdminGiveaway.waiting_winner_count)
+    prompt = await message.answer("🏆 Сколько победителей? (число):")
+    await state.update_data(_prompt_msg_id=prompt.message_id)
+
+
+@router.message(AdminGiveaway.waiting_winner_count)
+async def process_giveaway_winners(message: Message, state: FSMContext):
+    try:
+        count = int(message.text.strip())
+        if count < 1:
+            raise ValueError
+    except (ValueError, AttributeError):
+        err = await message.answer("❌ Введите положительное число.")
+        await _safe_delete(message)
+        asyncio.create_task(_auto_delete(err))
+        return
+    await _del_bot_prompt(message, state)
+    await _safe_delete(message)
+    await state.update_data(gw_winner_count=count)
+    await state.set_state(AdminGiveaway.waiting_end_time)
+    prompt = await message.answer("⏰ Когда завершить? (ДД.ММ.ГГГГ ЧЧ:ММ):")
+    await state.update_data(_prompt_msg_id=prompt.message_id)
+
+
+@router.message(AdminGiveaway.waiting_end_time)
+async def process_giveaway_end(message: Message, state: FSMContext):
+    from datetime import datetime as dt
+    text = (message.text or "").strip()
+    try:
+        ends_at = dt.strptime(text, "%d.%m.%Y %H:%M").isoformat()
+    except ValueError:
+        try:
+            ends_at = dt.strptime(text, "%d.%m.%Y").isoformat()
+        except ValueError:
+            err = await message.answer("❌ Формат: ДД.ММ.ГГГГ ЧЧ:ММ")
+            await _safe_delete(message)
+            asyncio.create_task(_auto_delete(err))
+            return
+    await _del_bot_prompt(message, state)
+    await _safe_delete(message)
+    data = await state.get_data()
+    await state.clear()
+    gw_id = await create_giveaway(
+        title=data["gw_title"],
+        description=data["gw_description"],
+        prize_text=data["gw_prize"],
+        prize_promo_reward=None,
+        winner_count=data["gw_winner_count"],
+        ends_at=ends_at,
+        created_by=message.from_user.id,
+    )
+    await message.answer(
+        f"✅ Розыгрыш #{gw_id} создан!\n\n"
+        f"🎁 {data['gw_title']}\n"
+        f"🎖 Приз: {data['gw_prize']}\n"
+        f"🏆 Победителей: {data['gw_winner_count']}\n"
+        f"⏰ До: {text}",
+        reply_markup=giveaway_admin_kb(),
+    )
+
+
+@router.callback_query(F.data.startswith("adm:giveaway_list:"))
+async def cb_giveaway_admin_list(callback: CallbackQuery, state: FSMContext):
+    if not await is_admin(callback.from_user.id):
+        await callback.answer("⛔ Нет доступа", show_alert=True)
+        return
+    await state.clear()
+    giveaways = await get_active_giveaways()
+    if not giveaways:
+        await callback.message.edit_text("📭 Нет активных розыгрышей.", reply_markup=giveaway_admin_kb())
+        await callback.answer()
+        return
+    from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
+    buttons = []
+    for g in giveaways:
+        entries = await count_giveaway_entries(g["id"])
+        buttons.append([InlineKeyboardButton(
+            text=f"🎁 #{g['id']}: {g['title'][:25]} ({entries} уч.)",
+            callback_data=f"adm:giveaway_view:{g['id']}",
+        )])
+    buttons.append([InlineKeyboardButton(text="◀️ Назад", callback_data="adm:giveaway")])
+    await callback.message.edit_text("🎁 Активные розыгрыши:", reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons))
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("adm:giveaway_view:"))
+async def cb_giveaway_admin_view(callback: CallbackQuery):
+    if not await is_admin(callback.from_user.id):
+        await callback.answer("⛔ Нет доступа", show_alert=True)
+        return
+    gw_id = int(callback.data.split(":")[2])
+    g = await get_giveaway(gw_id)
+    if not g:
+        await callback.answer("❌ Не найден", show_alert=True)
+        return
+    entries = await count_giveaway_entries(gw_id)
+    end_time = g["ends_at"][:16].replace("T", " ") if g["ends_at"] else "—"
+    text = (
+        f"🎁 **Розыгрыш #{gw_id}: {g['title']}**\n\n"
+        f"📝 {g['description']}\n"
+        f"🎖 Приз: {g['prize_text']}\n"
+        f"👥 Участников: {entries}\n"
+        f"🏆 Победителей: {g['winner_count']}\n"
+        f"⏰ До: {end_time}\n"
+        f"Статус: {g['status']}"
+    )
+    await callback.message.edit_text(
+        text,
+        reply_markup=giveaway_admin_view_kb(gw_id, g["status"] == "active"),
+        parse_mode="Markdown",
+    )
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("adm:giveaway_end:"))
+async def cb_giveaway_end_now(callback: CallbackQuery):
+    if not await is_admin(callback.from_user.id):
+        await callback.answer("⛔ Нет доступа", show_alert=True)
+        return
+    gw_id = int(callback.data.split(":")[2])
+    g = await get_giveaway(gw_id)
+    if not g or g["status"] != "active":
+        await callback.answer("❌ Розыгрыш не активен", show_alert=True)
+        return
+    entries = await count_giveaway_entries(gw_id)
+    if entries == 0:
+        from database import get_pool
+        pool = await get_pool()
+        await pool.execute("UPDATE giveaways SET status = 'ended' WHERE id = $1", gw_id)
+        await callback.message.edit_text("❌ Нет участников. Розыгрыш отменён.", reply_markup=giveaway_admin_kb())
+        await callback.answer()
+        return
+    winners = await pick_giveaway_winners(gw_id, g["winner_count"])
+    # Notify winners
+    bot = callback.bot
+    winner_names = []
+    for w in winners:
+        winner_names.append(w.get("username") or str(w["telegram_id"]))
+        code_text = ""
+        if g.get("prize_promo_reward"):
+            code = await generate_winner_code(
+                w["telegram_id"], g["prize_text"], g["prize_promo_reward"], g["created_by"])
+            code_text = f"\n\n🎟 Ваш код: `{code}`\nАктивируйте: /redeem {code}"
+        try:
+            await bot.send_message(
+                w["telegram_id"],
+                f"🎉 Поздравляем! Вы выиграли в розыгрыше «{g['title']}»!\n\n🎖 Приз: {g['prize_text']}{code_text}",
+                parse_mode="Markdown",
+            )
+        except Exception:
+            pass
+    await callback.message.edit_text(
+        f"🏆 Розыгрыш «{g['title']}» завершён!\n\n"
+        f"Победители ({len(winners)}):\n" +
+        "\n".join(f"• @{n}" for n in winner_names),
+        reply_markup=giveaway_admin_kb(),
+    )
     await callback.answer()

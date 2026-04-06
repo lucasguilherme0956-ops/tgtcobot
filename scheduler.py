@@ -10,6 +10,10 @@ from database import (
     get_tasks_for_auto_priority, update_task_priority,
     get_weekly_report_data, keepalive,
     get_upcoming_deadlines,
+    get_ending_giveaways, pick_giveaway_winners, generate_winner_code,
+    get_expiring_polls, close_poll,
+    log_server_status, get_server_downtime_minutes,
+    compute_weekly_top, save_weekly_top, get_all_subscribers,
 )
 from utils.notifications import build_summary_text
 
@@ -138,6 +142,104 @@ async def _deadline_reminder():
             logger.warning(f"Deadline reminder failed for {admin_id}: {e}")
 
 
+async def _check_giveaways():
+    """Завершает розыгрыши по времени, выбирает победителей."""
+    if not _bot:
+        return
+    ending = await get_ending_giveaways()
+    for g in ending:
+        from database import count_giveaway_entries, get_pool
+        entries = await count_giveaway_entries(g["id"])
+        if entries == 0:
+            pool = await get_pool()
+            await pool.execute("UPDATE giveaways SET status = 'ended' WHERE id = $1", g["id"])
+            continue
+        winners = await pick_giveaway_winners(g["id"], g["winner_count"])
+        for w in winners:
+            code_text = ""
+            if g.get("prize_promo_reward"):
+                code = await generate_winner_code(
+                    w["telegram_id"], g["prize_text"], g["prize_promo_reward"], g["created_by"])
+                code_text = f"\n\n🎟 Ваш код: `{code}`\nАктивируйте: /redeem {code}"
+            try:
+                await _bot.send_message(
+                    w["telegram_id"],
+                    f"🎉 Поздравляем! Вы выиграли в розыгрыше «{g['title']}»!\n\n"
+                    f"🎖 Приз: {g['prize_text']}{code_text}",
+                    parse_mode="Markdown",
+                )
+            except Exception:
+                pass
+
+
+async def _check_polls():
+    """Закрывает опросы по истечении времени."""
+    expiring = await get_expiring_polls()
+    for p in expiring:
+        await close_poll(p["id"])
+
+
+async def _monitor_server():
+    """Считает онлайн из stats_cache, логирует, алертит при даунтайме."""
+    if not _bot:
+        return
+    import json
+    from database import get_pool
+    from datetime import timedelta
+    pool = await get_pool()
+    cutoff = (now_msk() - timedelta(minutes=10)).isoformat()
+    rows = await pool.fetch(
+        "SELECT stats_json FROM stats_cache WHERE place = 'public' AND updated_at > $1",
+        cutoff)
+    online = 0
+    for r in rows:
+        try:
+            data = json.loads(r["stats_json"])
+            if data.get("isOnline"):
+                online += 1
+        except Exception:
+            pass
+    await log_server_status(online)
+    downtime = await get_server_downtime_minutes()
+    if downtime >= 15:
+        admin_ids = await get_all_admin_ids()
+        for aid in admin_ids:
+            try:
+                await _bot.send_message(aid, f"🔴 **Сервер недоступен** {downtime}+ мин!",
+                                        parse_mode="Markdown")
+            except Exception:
+                pass
+
+
+async def _weekly_top_broadcast():
+    """Каждый понедельник: топ за неделю, рассылка подписчикам."""
+    if not _bot:
+        return
+    import asyncio
+    from datetime import timedelta
+    now = now_msk()
+    week_start = (now - timedelta(days=now.weekday())).strftime("%Y-%m-%d")
+    for stat in ["wins", "money", "timePlayed"]:
+        top = await compute_weekly_top(stat, 10)
+        if top:
+            await save_weekly_top(week_start, stat, top)
+    wins_top = await compute_weekly_top("wins", 10)
+    if not wins_top:
+        return
+    medals = ["🥇", "🥈", "🥉"]
+    text = f"📊 **Топ недели** (🏆 Победы):\n🗓 {week_start}\n\n"
+    for i, entry in enumerate(wins_top):
+        pos = medals[i] if i < 3 else f"{i + 1}."
+        text += f"{pos} **{entry['username']}** — {entry['value']}\n"
+    subs = await get_all_subscribers()
+    for uid in subs:
+        try:
+            await _bot.send_message(uid, text, parse_mode="Markdown")
+        except Exception:
+            pass
+        await asyncio.sleep(0.05)
+
+
 def setup_scheduler(bot) -> AsyncIOScheduler:
     global _scheduler, _bot
     _bot = bot
@@ -149,6 +251,10 @@ def setup_scheduler(bot) -> AsyncIOScheduler:
     _scheduler.add_job(_weekly_report, CronTrigger(day_of_week="mon", hour=10, minute=0), id="weekly_report")
     _scheduler.add_job(_deadline_reminder, CronTrigger(hour="*/4", minute=30), id="deadline_reminder")
     _scheduler.add_job(keepalive, CronTrigger(minute="*/4"), id="db_keepalive")
+    _scheduler.add_job(_check_giveaways, CronTrigger(minute="*"), id="check_giveaways")
+    _scheduler.add_job(_check_polls, CronTrigger(minute="*"), id="check_polls")
+    _scheduler.add_job(_monitor_server, CronTrigger(minute="*/5"), id="server_monitor")
+    _scheduler.add_job(_weekly_top_broadcast, CronTrigger(day_of_week="mon", hour=10, minute=30), id="weekly_top")
     return _scheduler
 
 

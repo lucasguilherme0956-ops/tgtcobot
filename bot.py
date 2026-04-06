@@ -193,6 +193,24 @@ async def api_bulk_stats(request):
     return web.json_response({"ok": True, "saved": saved})
 
 
+async def api_check_code(request):
+    """Roblox validates a promo code entered by a player."""
+    auth = request.headers.get("X-API-Key", "")
+    if not auth or auth != GAME_API_KEY:
+        return web.json_response({"error": "unauthorized"}, status=401)
+    try:
+        data = await request.json()
+    except Exception:
+        return web.json_response({"error": "invalid json"}, status=400)
+    code = (data.get("code") or "").strip()
+    roblox_username = (data.get("roblox_username") or "").strip()
+    if not code or not roblox_username:
+        return web.json_response({"error": "missing code or roblox_username"}, status=400)
+    from database import check_code_for_roblox
+    result = await check_code_for_roblox(code, roblox_username)
+    return web.json_response(result)
+
+
 async def main():
     if not BOT_TOKEN:
         logger.error("BOT_TOKEN не задан в .env!")
@@ -267,6 +285,7 @@ async def main():
     app.router.add_get("/api/pending", api_pending)
     app.router.add_post("/api/stats", api_stats_receive)
     app.router.add_post("/api/bulk-stats", api_bulk_stats)
+    app.router.add_post("/api/check-code", api_check_code)
     port = int(os.environ.get("PORT", 10000))
     runner = web.AppRunner(app)
     await runner.setup()
@@ -288,6 +307,12 @@ async def main():
         BotCommand(command="news", description="Опубликовать новость (админ)"),
         BotCommand(command="export", description="Экспорт задач (CSV)"),
         BotCommand(command="lang", description="Сменить язык / Change language"),
+        BotCommand(command="redeem", description="Активировать промокод"),
+        BotCommand(command="faq", description="Часто задаваемые вопросы"),
+        BotCommand(command="polls", description="Опросы"),
+        BotCommand(command="server", description="Статус сервера"),
+        BotCommand(command="weeklytop", description="Топ недели"),
+        BotCommand(command="giveaways", description="Розыгрыши"),
     ])
     try:
         await dp.start_polling(bot)
