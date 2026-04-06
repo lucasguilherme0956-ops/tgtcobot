@@ -23,6 +23,7 @@ from database import (
     get_player_by_telegram, get_player_by_username, get_player_stats,
     get_player_matches, get_player_leaderboard, link_player_telegram,
     subscribe_news, unsubscribe_news, is_news_subscriber,
+    link_telegram_roblox, get_linked_roblox_username, get_stats_cache,
 )
 from keyboards.inline import (
     main_menu_kb, skip_photo_kb, photo_progress_kb, confirm_task_kb,
@@ -55,6 +56,17 @@ async def _auto_delete(msg, delay: float = 4.0):
         await msg.delete()
     except Exception:
         pass
+
+
+async def _del_bot_prompt(message: Message, state: FSMContext):
+    """Delete the previous bot prompt stored in FSM."""
+    data = await state.get_data()
+    mid = data.get("_prompt_msg_id")
+    if mid:
+        try:
+            await message.bot.delete_message(message.chat.id, mid)
+        except Exception:
+            pass
 
 # Анти-спам: паттерны мусорных описаний
 _SPAM_RE = re.compile(
@@ -977,10 +989,10 @@ async def cb_game_stats(callback: CallbackQuery, state: FSMContext):
     lang = await get_user_lang(callback.from_user.id)
 
     # Try linked account first
-    player = await get_player_by_telegram(callback.from_user.id)
-    if player:
+    linked_name = await get_linked_roblox_username(callback.from_user.id)
+    if linked_name:
         await callback.answer()
-        await _request_roblox_stats(callback.message, player["roblox_username"], lang, place="public")
+        await _request_roblox_stats(callback.message, linked_name, lang, place="public")
         return
 
     # No linked account — ask for username
@@ -996,40 +1008,44 @@ async def cb_game_stats(callback: CallbackQuery, state: FSMContext):
 async def cmd_stats(message: Message, state: FSMContext):
     lang = await get_user_lang(message.from_user.id)
     args = (message.text or "").split(maxsplit=1)
+    await _safe_delete(message)
 
     if len(args) > 1:
         username = args[1].strip()
         await _request_roblox_stats(message, username, lang, place="public")
         return
 
-    player = await get_player_by_telegram(message.from_user.id)
-    if player:
-        await _request_roblox_stats(message, player["roblox_username"], lang, place="public")
+    linked_name = await get_linked_roblox_username(message.from_user.id)
+    if linked_name:
+        await _request_roblox_stats(message, linked_name, lang, place="public")
         return
 
     await state.set_state(StatsLookup.waiting_username)
     await state.update_data(place="public")
-    await message.answer(t("stats_prompt", lang), parse_mode="Markdown")
+    prompt = await message.answer(t("stats_prompt", lang), parse_mode="Markdown")
+    await state.update_data(_prompt_msg_id=prompt.message_id)
 
 
 @router.message(Command("statsprivate"))
 async def cmd_stats_private(message: Message, state: FSMContext):
     lang = await get_user_lang(message.from_user.id)
     args = (message.text or "").split(maxsplit=1)
+    await _safe_delete(message)
 
     if len(args) > 1:
         username = args[1].strip()
         await _request_roblox_stats(message, username, lang, place="private")
         return
 
-    player = await get_player_by_telegram(message.from_user.id)
-    if player:
-        await _request_roblox_stats(message, player["roblox_username"], lang, place="private")
+    linked_name = await get_linked_roblox_username(message.from_user.id)
+    if linked_name:
+        await _request_roblox_stats(message, linked_name, lang, place="private")
         return
 
     await state.set_state(StatsLookup.waiting_username)
     await state.update_data(place="private")
-    await message.answer(t("stats_prompt", lang), parse_mode="Markdown")
+    prompt = await message.answer(t("stats_prompt", lang), parse_mode="Markdown")
+    await state.update_data(_prompt_msg_id=prompt.message_id)
 
 
 @router.message(StatsLookup.waiting_username)
@@ -1038,6 +1054,7 @@ async def process_stats_lookup(message: Message, state: FSMContext):
     username = (message.text or "").strip()
     data = await state.get_data()
     place = data.get("place", "public")
+    await _del_bot_prompt(message, state)
     await state.clear()
     await _safe_delete(message)
     if not username or len(username) > 50:
@@ -1224,19 +1241,28 @@ async def cb_game_link(callback: CallbackQuery, state: FSMContext):
 async def cmd_link(message: Message, state: FSMContext):
     lang = await get_user_lang(message.from_user.id)
     args = (message.text or "").split(maxsplit=1)
+    await _safe_delete(message)
     if len(args) > 1:
         username = args[1].strip()
+        # Check stats_cache or players
         player = await get_player_by_username(username)
-        if not player:
+        cached = await get_stats_cache(username, "public") if not player else None
+        if not player and not cached:
+            cached = await get_stats_cache(username, "private")
+        if not player and not cached:
             await message.answer(t("link_fail", lang, name=username))
             return
-        await link_player_telegram(player["roblox_id"], message.from_user.id)
-        await message.answer(t("link_success", lang, name=player["roblox_username"]),
+        display_name = player["roblox_username"] if player else username
+        if player:
+            await link_player_telegram(player["roblox_id"], message.from_user.id)
+        await link_telegram_roblox(message.from_user.id, display_name)
+        await message.answer(t("link_success", lang, name=display_name),
                              reply_markup=back_to_menu_kb(lang), parse_mode="Markdown")
         return
 
     await state.set_state(LinkRoblox.waiting_username)
-    await message.answer(t("link_prompt", lang), parse_mode="Markdown")
+    prompt = await message.answer(t("link_prompt", lang), parse_mode="Markdown")
+    await state.update_data(_prompt_msg_id=prompt.message_id)
 
 
 @router.message(LinkRoblox.waiting_username)
@@ -1244,23 +1270,33 @@ async def process_link_roblox(message: Message, state: FSMContext):
     lang = await get_user_lang(message.from_user.id)
     username = (message.text or "").strip()
     if not username or len(username) > 50:
+        await _del_bot_prompt(message, state)
         await state.clear()
         await _safe_delete(message)
         await message.answer(t("link_fail", lang, name=username or "?"))
         return
 
+    # Check stats_cache or players
     player = await get_player_by_username(username)
-    if not player:
+    cached = await get_stats_cache(username, "public") if not player else None
+    if not player and not cached:
+        cached = await get_stats_cache(username, "private")
+    if not player and not cached:
+        await _del_bot_prompt(message, state)
         await state.clear()
         await _safe_delete(message)
         await message.answer(t("link_fail", lang, name=username))
         return
 
+    await _del_bot_prompt(message, state)
     await _safe_delete(message)
-    await link_player_telegram(player["roblox_id"], message.from_user.id)
+    display_name = player["roblox_username"] if player else username
+    if player:
+        await link_player_telegram(player["roblox_id"], message.from_user.id)
+    await link_telegram_roblox(message.from_user.id, display_name)
     await state.clear()
     await message.answer(
-        t("link_success", lang, name=player["roblox_username"]),
+        t("link_success", lang, name=display_name),
         reply_markup=back_to_menu_kb(lang),
         parse_mode="Markdown",
     )

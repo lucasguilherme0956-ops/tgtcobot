@@ -295,6 +295,13 @@ async def init_db():
             )
         """)
 
+        await conn.execute("""
+            CREATE TABLE IF NOT EXISTS telegram_roblox_links (
+                telegram_id BIGINT PRIMARY KEY,
+                roblox_username TEXT NOT NULL
+            )
+        """)
+
         # Index for fast player lookup
         try:
             await conn.execute("CREATE INDEX IF NOT EXISTS idx_players_tg ON players(telegram_id)")
@@ -1341,6 +1348,34 @@ async def link_player_telegram(roblox_id: int, telegram_id: int) -> bool:
         telegram_id, roblox_id,
     )
     return result.split()[-1] != "0"
+
+
+async def link_telegram_roblox(telegram_id: int, roblox_username: str):
+    """Link Telegram user to Roblox username (no roblox_id needed)."""
+    pool = await get_pool()
+    await pool.execute("""
+        INSERT INTO telegram_roblox_links (telegram_id, roblox_username)
+        VALUES ($1, $2)
+        ON CONFLICT (telegram_id) DO UPDATE SET roblox_username = $2
+    """, telegram_id, roblox_username)
+
+
+async def get_linked_roblox_username(telegram_id: int) -> str | None:
+    """Get linked Roblox username by Telegram ID."""
+    pool = await get_pool()
+    # First check direct link table
+    row = await pool.fetchval(
+        "SELECT roblox_username FROM telegram_roblox_links WHERE telegram_id = $1",
+        telegram_id,
+    )
+    if row:
+        return row
+    # Fallback: check players table
+    row2 = await pool.fetchval(
+        "SELECT roblox_username FROM players WHERE telegram_id = $1",
+        telegram_id,
+    )
+    return row2
 
 
 async def get_player_by_roblox(roblox_id: int) -> dict | None:

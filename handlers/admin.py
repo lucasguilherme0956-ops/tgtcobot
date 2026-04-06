@@ -538,6 +538,7 @@ async def cmd_add_admin(message: Message, state: FSMContext):
     if message.from_user.id != MAIN_ADMIN_ID:
         await message.answer("⛔ Только главный админ может добавлять админов.")
         return
+    await _safe_delete(message)
     await state.set_state(AdminAddUser.waiting_id)
     prompt = await message.answer("Введите Telegram ID нового админа:")
     await state.update_data(_prompt_msg_id=prompt.message_id)
@@ -567,6 +568,7 @@ async def cmd_remove_admin(message: Message, state: FSMContext):
         await message.answer("⛔ Только главный админ может удалять админов.")
         return
 
+    await _safe_delete(message)
     admins = await get_all_admin_ids()
     admins_text = "\n".join(f"• `{a}`" for a in admins)
     await state.set_state(AdminRemoveUser.waiting_id)
@@ -1916,6 +1918,7 @@ async def process_link_target_id(message: Message, state: FSMContext):
 async def cmd_news(message: Message, state: FSMContext):
     if message.from_user.id != MAIN_ADMIN_ID:
         return
+    await _safe_delete(message)
     await state.set_state(AdminNews.waiting_content)
     prompt = await message.answer(t("news_prompt", "ru"))
     await state.update_data(_prompt_msg_id=prompt.message_id)
