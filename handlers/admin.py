@@ -2001,12 +2001,13 @@ async def process_news_link(message: Message, state: FSMContext):
             [InlineKeyboardButton(text=link_text, url=link_url)],
         ])
 
+    news_header = "📢 Новости игры!\n\n"
     if news["type"] == "photo":
-        preview_msg = await message.answer_photo(news["file_id"], caption=news.get("caption"), reply_markup=preview_kb)
+        preview_msg = await message.answer_photo(news["file_id"], caption=news_header + (news.get("caption") or ""), reply_markup=preview_kb)
     elif news["type"] == "video":
-        preview_msg = await message.answer_video(news["file_id"], caption=news.get("caption"), reply_markup=preview_kb)
+        preview_msg = await message.answer_video(news["file_id"], caption=news_header + (news.get("caption") or ""), reply_markup=preview_kb)
     else:
-        preview_msg = await message.answer(news["text"], reply_markup=preview_kb)
+        preview_msg = await message.answer(news_header + news["text"], reply_markup=preview_kb)
 
     subs = await get_all_subscribers()
     if not subs:
@@ -2052,14 +2053,17 @@ async def cb_news_confirm(callback: CallbackQuery, state: FSMContext):
     ok = 0
     fail = 0
     bot = callback.bot
+    news_header = "📢 Новости игры!\n\n"
     for uid in subs:
         try:
             if news["type"] == "photo":
-                await bot.send_photo(uid, news["file_id"], caption=news.get("caption"), reply_markup=link_kb)
+                caption = news_header + (news.get("caption") or "")
+                await bot.send_photo(uid, news["file_id"], caption=caption, reply_markup=link_kb)
             elif news["type"] == "video":
-                await bot.send_video(uid, news["file_id"], caption=news.get("caption"), reply_markup=link_kb)
+                caption = news_header + (news.get("caption") or "")
+                await bot.send_video(uid, news["file_id"], caption=caption, reply_markup=link_kb)
             else:
-                await bot.send_message(uid, news["text"], reply_markup=link_kb)
+                await bot.send_message(uid, news_header + news["text"], reply_markup=link_kb)
             ok += 1
         except Exception:
             fail += 1
