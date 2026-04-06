@@ -152,6 +152,7 @@ class AdminPromo(StatesGroup):
     waiting_code = State()
     waiting_reward = State()
     waiting_max_uses = State()
+    waiting_roblox_reward = State()
     waiting_expiry = State()
 
 
@@ -2194,6 +2195,36 @@ async def process_promo_max_uses(message: Message, state: FSMContext):
     await _del_bot_prompt(message, state)
     await _safe_delete(message)
     await state.update_data(promo_max_uses=max_uses)
+    await state.set_state(AdminPromo.waiting_roblox_reward)
+    prompt = await message.answer(
+        "🎮 Награда в Roblox (JSON):\n"
+        "Примеры: `{\"Money\": 500}` или `{\"Skin\": \"Alpha Soldier\"}`\n"
+        "Или /skip если код только для Telegram.",
+        parse_mode="Markdown",
+    )
+    await state.update_data(_prompt_msg_id=prompt.message_id)
+
+
+@router.message(AdminPromo.waiting_roblox_reward)
+async def process_promo_roblox_reward(message: Message, state: FSMContext):
+    text = (message.text or "").strip()
+    roblox_data = None
+    if text != "/skip":
+        import json
+        try:
+            parsed = json.loads(text)
+            if not isinstance(parsed, dict):
+                raise ValueError
+            roblox_data = text
+        except (json.JSONDecodeError, ValueError):
+            err = await message.answer("❌ Неверный JSON. Пример: `{\"Money\": 500}` или /skip",
+                                       parse_mode="Markdown")
+            await _safe_delete(message)
+            asyncio.create_task(_auto_delete(err))
+            return
+    await _del_bot_prompt(message, state)
+    await _safe_delete(message)
+    await state.update_data(promo_roblox_data=roblox_data)
     await state.set_state(AdminPromo.waiting_expiry)
     prompt = await message.answer("📅 Дата истечения (ДД.ММ.ГГГГ) или /skip:")
     await state.update_data(_prompt_msg_id=prompt.message_id)
@@ -2222,12 +2253,14 @@ async def process_promo_expiry(message: Message, state: FSMContext):
         max_uses=data["promo_max_uses"],
         expires_at=expires_at,
         created_by=message.from_user.id,
+        roblox_reward_data=data.get("promo_roblox_data"),
     )
+    roblox_info = f"\n🎮 Roblox: `{data.get('promo_roblox_data', 'нет')}`" if data.get("promo_roblox_data") else ""
     await message.answer(
         f"✅ Промокод `{data['promo_code']}` создан!\n"
         f"Награда: {data['promo_reward']}\n"
         f"Макс. активаций: {data['promo_max_uses']}\n"
-        f"Истекает: {text if text != '/skip' else 'никогда'}",
+        f"Истекает: {text if text != '/skip' else 'никогда'}{roblox_info}",
         reply_markup=promo_admin_kb(),
         parse_mode="Markdown",
     )
