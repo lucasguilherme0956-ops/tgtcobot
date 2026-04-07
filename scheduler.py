@@ -12,7 +12,7 @@ from database import (
     get_upcoming_deadlines,
     get_ending_giveaways, pick_giveaway_winners, generate_winner_code,
     get_expiring_polls, close_poll,
-    log_server_status, get_server_downtime_minutes,
+    log_server_status,
     compute_weekly_top, save_weekly_top, get_all_subscribers,
 )
 from utils.notifications import build_summary_text
@@ -187,7 +187,7 @@ async def _check_polls():
 
 
 async def _monitor_server():
-    """Считает онлайн из stats_cache, логирует, алертит при даунтайме."""
+    """Считает онлайн из stats_cache, логирует."""
     if not _bot:
         return
     try:
@@ -208,15 +208,6 @@ async def _monitor_server():
             except Exception:
                 pass
         await log_server_status(online)
-        downtime = await get_server_downtime_minutes()
-        if downtime >= 15:
-            admin_ids = await get_all_admin_ids()
-            for aid in admin_ids:
-                try:
-                    await _bot.send_message(aid, f"🔴 **Сервер недоступен** {downtime}+ мин!",
-                                            parse_mode="Markdown")
-                except Exception:
-                    pass
     except Exception as e:
         logger.warning(f"_monitor_server error: {e}")
 
