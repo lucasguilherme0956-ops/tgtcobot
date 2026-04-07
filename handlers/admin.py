@@ -186,10 +186,11 @@ async def cmd_cancel_admin(message: Message, state: FSMContext):
         return
     current = await state.get_state()
     await _safe_delete(message)
-    if current is None:
-        return
     await state.clear()
-    await message.answer("❌ Отменено.", reply_markup=await _admin_menu_kb())
+    if current is None:
+        await message.answer("📋 Админ-панель:", reply_markup=await _admin_menu_kb())
+    else:
+        await message.answer("❌ Отменено.", reply_markup=await _admin_menu_kb())
 
 
 # ─── Команда /admin ───

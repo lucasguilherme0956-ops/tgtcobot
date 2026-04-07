@@ -147,11 +147,12 @@ async def cmd_start(message: Message, state: FSMContext):
 async def cmd_cancel(message: Message, state: FSMContext):
     current = await state.get_state()
     await _safe_delete(message)
-    if current is None:
-        return
     await state.clear()
     lang = await get_user_lang(message.from_user.id)
-    await message.answer("❌ Отменено.", reply_markup=main_menu_kb(lang))
+    if current is None:
+        await message.answer(t("main_menu", lang), reply_markup=main_menu_kb(lang))
+    else:
+        await message.answer("❌ Отменено.", reply_markup=main_menu_kb(lang))
 
 
 @router.callback_query(F.data == "main_menu")
