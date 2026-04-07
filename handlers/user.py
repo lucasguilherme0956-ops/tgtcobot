@@ -512,12 +512,14 @@ async def cb_my_tasks(callback: CallbackQuery):
 
 @router.callback_query(F.data.startswith("user:view:"))
 async def cb_user_view_task(callback: CallbackQuery):
+    await callback.answer()
     task_id = int(callback.data.split(":")[2])
-    task = await get_task(task_id)
-    lang = await get_user_lang(callback.from_user.id)
+    task, lang = await asyncio.gather(
+        get_task(task_id),
+        get_user_lang(callback.from_user.id),
+    )
 
     if not task:
-        await callback.answer(t("task_not_found", lang), show_alert=True)
         return
 
     cat_label = CATEGORIES.get(task["category"], "❓")
@@ -533,7 +535,13 @@ async def cb_user_view_task(callback: CallbackQuery):
         f"Создана: {task['created_at'][:16].replace('T', ' ')}"
     )
 
-    tags = await get_task_tags(task_id)
+    tags, photos, votes, voted = await asyncio.gather(
+        get_task_tags(task_id),
+        get_task_photos(task_id),
+        get_vote_count(task["id"]),
+        has_voted(task["id"], callback.from_user.id),
+    )
+
     if tags:
         text += f"\n🏷 Теги: {', '.join(tags)}"
 
@@ -542,10 +550,6 @@ async def cb_user_view_task(callback: CallbackQuery):
 
     can_edit = (task["status"] == "new" and task["user_id"] == callback.from_user.id)
 
-    photos = await get_task_photos(task_id)
-
-    votes = await get_vote_count(task["id"])
-    voted = await has_voted(task["id"], callback.from_user.id)
     if votes:
         text += f"\n👍 Голосов: {votes}"
     kb = user_task_view_kb_with_vote(task_id, votes, voted, lang, can_edit)
@@ -576,8 +580,6 @@ async def cb_user_view_task(callback: CallbackQuery):
             await callback.message.edit_text(text, reply_markup=kb, parse_mode="Markdown")
         except Exception:
             await callback.message.answer(text, reply_markup=kb, parse_mode="Markdown")
-
-    await callback.answer()
 
 
 # ─── Редактирование задачи ───
@@ -759,8 +761,7 @@ async def cb_vote(callback: CallbackQuery):
         await callback.answer(t("task_not_found", lang), show_alert=True)
         return
 
-    voted = await toggle_vote(task_id, callback.from_user.id)
-    votes = await get_vote_count(task_id)
+    voted, votes = await toggle_vote(task_id, callback.from_user.id)
 
     if voted:
         await callback.answer(t("vote_added", lang))
@@ -779,8 +780,10 @@ async def cb_vote(callback: CallbackQuery):
 
 async def _show_feed_card(callback: CallbackQuery, offset: int, sort: str = "rating"):
     """Display a single feed card at the given offset."""
-    lang = await get_user_lang(callback.from_user.id)
-    total = await count_feed_tasks()
+    lang, total = await asyncio.gather(
+        get_user_lang(callback.from_user.id),
+        count_feed_tasks(),
+    )
 
     if total == 0:
         await callback.message.edit_text(
@@ -799,7 +802,12 @@ async def _show_feed_card(callback: CallbackQuery, offset: int, sort: str = "rat
     task = tasks[0]
     cat_emoji = CATEGORIES.get(task["category"], "❓").split()[0]
     cat_label = CATEGORIES.get(task["category"], "❓")
-    user_vote = await get_user_vote_type(task["id"], callback.from_user.id)
+
+    user_vote, tags, photos = await asyncio.gather(
+        get_user_vote_type(task["id"], callback.from_user.id),
+        get_task_tags(task["id"]),
+        get_task_photos(task["id"]),
+    )
 
     text = t("feed_card", lang,
              pos=offset + 1, total=total,
@@ -809,14 +817,12 @@ async def _show_feed_card(callback: CallbackQuery, offset: int, sort: str = "rat
              rating=task["rating"],
              author=task.get("username", "?"))
 
-    tags = await get_task_tags(task["id"])
     if tags:
         text += "\n🏷 " + ", ".join(tags)
 
     kb = feed_card_kb(task["id"], task["likes"], task["dislikes"],
                       user_vote, offset, total, lang, sort=sort)
 
-    photos = await get_task_photos(task["id"])
     photo_id = photos[0]["file_id"] if photos else task.get("photo_file_id")
 
     if photo_id:
@@ -887,26 +893,26 @@ async def cmd_feed(message: Message, state: FSMContext):
 
 @router.callback_query(F.data.startswith("feed:"))
 async def cb_feed_start(callback: CallbackQuery, state: FSMContext):
+    await callback.answer()
     await state.clear()
     offset = int(callback.data.split(":")[1])
     await _show_feed_card(callback, offset)
-    await callback.answer()
 
 
 @router.callback_query(F.data.startswith("fsort:"))
 async def cb_feed_sort(callback: CallbackQuery):
+    await callback.answer()
     parts = callback.data.split(":")
     sort_mode = parts[1]
     offset = int(parts[2]) if len(parts) > 2 else 0
     await _show_feed_card(callback, 0, sort=sort_mode)
-    await callback.answer()
 
 
 @router.callback_query(F.data.startswith("fn:"))
 async def cb_feed_navigate(callback: CallbackQuery):
+    await callback.answer()
     offset = int(callback.data.split(":")[1])
     await _show_feed_card(callback, offset)
-    await callback.answer()
 
 
 @router.callback_query(F.data.startswith("fl:"))
@@ -916,7 +922,7 @@ async def cb_feed_like(callback: CallbackQuery):
     offset = int(parts[2])
     lang = await get_user_lang(callback.from_user.id)
 
-    voted = await toggle_vote(task_id, callback.from_user.id)
+    voted, _ = await toggle_vote(task_id, callback.from_user.id)
     if voted:
         await callback.answer(t("vote_added", lang))
     else:
@@ -932,7 +938,7 @@ async def cb_feed_dislike(callback: CallbackQuery):
     offset = int(parts[2])
     lang = await get_user_lang(callback.from_user.id)
 
-    voted = await toggle_dislike(task_id, callback.from_user.id)
+    voted, _ = await toggle_dislike(task_id, callback.from_user.id)
     if voted:
         await callback.answer(t("dislike_added", lang))
     else:

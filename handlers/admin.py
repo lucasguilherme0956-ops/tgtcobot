@@ -281,16 +281,20 @@ async def cb_admin_view_task(callback: CallbackQuery):
         await callback.answer("⛔ Нет доступа", show_alert=True)
         return
 
+    await callback.answer()
     task_id = int(callback.data.split(":")[2])
     task = await get_task(task_id)
     if not task:
-        await callback.answer("❌ Задача не найдена", show_alert=True)
         return
 
-    votes = await get_vote_count(task_id) if task["category"] in ("idea", "balance") else 0
-    tags = await get_task_tags(task_id)
-    photos = await get_task_photos(task_id)
-    links = await get_linked_tasks(task_id)
+    coros = [get_task_tags(task_id), get_task_photos(task_id), get_linked_tasks(task_id)]
+    if task["category"] in ("idea", "balance"):
+        coros.append(get_vote_count(task_id))
+    results = await asyncio.gather(*coros)
+    tags = results[0]
+    photos = results[1]
+    links = results[2]
+    votes = results[3] if len(results) > 3 else 0
     text = _format_task(task, votes, tags, len(photos), links=links)
 
     if task["status"] == "archived":
@@ -324,7 +328,6 @@ async def cb_admin_view_task(callback: CallbackQuery):
             await callback.message.edit_text(text, reply_markup=kb, parse_mode="Markdown")
         except Exception:
             await callback.message.answer(text, reply_markup=kb, parse_mode="Markdown")
-    await callback.answer()
 
 
 def _format_task(task: dict, votes: int = 0, tags: list[str] | None = None,

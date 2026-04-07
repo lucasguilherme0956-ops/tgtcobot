@@ -51,7 +51,7 @@ def now_msk() -> datetime:
 async def get_pool() -> asyncpg.Pool:
     global _pool
     if _pool is None:
-        _pool = await asyncpg.create_pool(DATABASE_URL, min_size=2, max_size=8)
+        _pool = await asyncpg.create_pool(DATABASE_URL, min_size=4, max_size=20)
     return _pool
 
 
@@ -312,6 +312,17 @@ async def init_db():
         except Exception:
             pass
 
+        # Performance indexes for tasks and task_photos
+        for idx_sql in [
+            "CREATE INDEX IF NOT EXISTS idx_tasks_status ON tasks(status)",
+            "CREATE INDEX IF NOT EXISTS idx_tasks_user_id ON tasks(user_id)",
+            "CREATE INDEX IF NOT EXISTS idx_task_photos_task ON task_photos(task_id)",
+        ]:
+            try:
+                await conn.execute(idx_sql)
+            except Exception:
+                pass
+
         await conn.execute("""
             CREATE TABLE IF NOT EXISTS news_subscribers (
                 user_id BIGINT PRIMARY KEY,
@@ -477,9 +488,16 @@ async def create_task(user_id: int, username: str | None, category: str,
 
 
 async def get_task(task_id: int) -> dict | None:
+    key = f"task:{task_id}"
+    cached = _cache.get(key)
+    if cached is not None:
+        return cached
     pool = await get_pool()
     row = await pool.fetchrow("SELECT * FROM tasks WHERE id = $1", task_id)
-    return _record_to_dict(row) if row else None
+    result = _record_to_dict(row) if row else None
+    if result is not None:
+        _cache.set(key, result, ttl=60)
+    return result
 
 
 async def get_tasks_filtered(status: str | None = None, category: str | None = None,
@@ -544,6 +562,8 @@ async def update_task_status(task_id: int, status: str):
     pool = await get_pool()
     await pool.execute("UPDATE tasks SET status = $1, updated_at = $2 WHERE id = $3",
                        status, ts, task_id)
+    _cache.delete(f"task:{task_id}")
+    _cache.delete("dashboard_stats")
 
 
 async def update_task_priority(task_id: int, priority: str):
@@ -551,6 +571,7 @@ async def update_task_priority(task_id: int, priority: str):
     pool = await get_pool()
     await pool.execute("UPDATE tasks SET priority = $1, updated_at = $2 WHERE id = $3",
                        priority, ts, task_id)
+    _cache.delete(f"task:{task_id}")
 
 
 async def get_user_tasks(user_id: int, limit: int = 10, offset: int = 0) -> list[dict]:
@@ -667,25 +688,34 @@ async def ban_user(user_id: int, hours: int, reason: str = "Флуд"):
         "reason = EXCLUDED.reason",
         user_id, until, reason,
     )
+    _cache.delete(f"banned:{user_id}")
 
 
 async def is_banned(user_id: int) -> bool:
+    key = f"banned:{user_id}"
+    cached = _cache.get(key)
+    if cached is not None:
+        return cached
     pool = await get_pool()
     row = await pool.fetchrow(
         "SELECT banned_until FROM user_bans WHERE user_id = $1", user_id
     )
     if not row:
+        _cache.set(key, False, ttl=10)
         return False
     banned_until = datetime.fromisoformat(row["banned_until"])
     if now_msk() >= banned_until:
         await pool.execute("DELETE FROM user_bans WHERE user_id = $1", user_id)
+        _cache.set(key, False, ttl=10)
         return False
+    _cache.set(key, True, ttl=10)
     return True
 
 
 async def unban_user(user_id: int):
     pool = await get_pool()
     await pool.execute("DELETE FROM user_bans WHERE user_id = $1", user_id)
+    _cache.delete(f"banned:{user_id}")
 
 
 async def get_ban_info(user_id: int) -> dict | None:
@@ -759,6 +789,8 @@ async def delete_task(task_id: int):
             await conn.execute("DELETE FROM task_photos WHERE task_id = $1", task_id)
             await conn.execute("DELETE FROM task_tags WHERE task_id = $1", task_id)
             await conn.execute("DELETE FROM tasks WHERE id = $1", task_id)
+    _cache.delete(f"task:{task_id}")
+    _cache.delete("dashboard_stats")
 
 
 # ─── Search ───
@@ -821,73 +853,97 @@ async def get_extended_stats() -> dict:
 
 # ─── Votes ───
 
-async def toggle_vote(task_id: int, user_id: int) -> bool:
-    """Toggle like vote. Returns True if voted, False if removed."""
+async def toggle_vote(task_id: int, user_id: int) -> tuple[bool, int]:
+    """Toggle like vote. Returns (voted, like_count)."""
     ts = now_msk().isoformat()
     pool = await get_pool()
-    row = await pool.fetchrow(
-        "SELECT value FROM votes WHERE task_id = $1 AND user_id = $2",
-        task_id, user_id,
-    )
-    if row:
-        if row["value"] == 1:
-            await pool.execute("DELETE FROM votes WHERE task_id = $1 AND user_id = $2",
-                               task_id, user_id)
-            _cache.invalidate("feed")
-            return False
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow(
+            "SELECT value FROM votes WHERE task_id = $1 AND user_id = $2",
+            task_id, user_id,
+        )
+        if row:
+            if row["value"] == 1:
+                await conn.execute("DELETE FROM votes WHERE task_id = $1 AND user_id = $2",
+                                   task_id, user_id)
+                voted = False
+            else:
+                await conn.execute("UPDATE votes SET value = 1, created_at = $1 WHERE task_id = $2 AND user_id = $3",
+                                   ts, task_id, user_id)
+                voted = True
         else:
-            await pool.execute("UPDATE votes SET value = 1, created_at = $1 WHERE task_id = $2 AND user_id = $3",
-                               ts, task_id, user_id)
-            _cache.invalidate("feed")
-            return True
-    else:
-        await pool.execute("INSERT INTO votes (task_id, user_id, created_at, value) VALUES ($1, $2, $3, 1)",
-                           task_id, user_id, ts)
-        _cache.invalidate("feed")
-        return True
+            await conn.execute("INSERT INTO votes (task_id, user_id, created_at, value) VALUES ($1, $2, $3, 1)",
+                               task_id, user_id, ts)
+            voted = True
+        count = await conn.fetchval(
+            "SELECT COUNT(*) FROM votes WHERE task_id = $1 AND value = 1", task_id
+        )
+    _cache.invalidate("feed:")
+    _cache.invalidate("feed_tasks:")
+    _cache.delete(f"votes:{task_id}")
+    _cache.delete(f"has_voted:{task_id}:{user_id}")
+    return voted, count
 
 
 async def get_vote_count(task_id: int) -> int:
     """Count of likes (value=1)."""
+    key = f"votes:{task_id}"
+    cached = _cache.get(key)
+    if cached is not None:
+        return cached
     pool = await get_pool()
-    return await pool.fetchval(
+    result = await pool.fetchval(
         "SELECT COUNT(*) FROM votes WHERE task_id = $1 AND value = 1", task_id
     )
+    _cache.set(key, result, ttl=15)
+    return result
 
 
 async def has_voted(task_id: int, user_id: int) -> bool:
+    key = f"has_voted:{task_id}:{user_id}"
+    cached = _cache.get(key)
+    if cached is not None:
+        return cached
     pool = await get_pool()
     row = await pool.fetchrow(
         "SELECT 1 FROM votes WHERE task_id = $1 AND user_id = $2 AND value = 1",
         task_id, user_id,
     )
-    return row is not None
+    result = row is not None
+    _cache.set(key, result, ttl=15)
+    return result
 
 
-async def toggle_dislike(task_id: int, user_id: int) -> bool:
-    """Toggle dislike. Returns True if disliked, False if removed."""
+async def toggle_dislike(task_id: int, user_id: int) -> tuple[bool, int]:
+    """Toggle dislike. Returns (disliked, dislike_count)."""
     ts = now_msk().isoformat()
     pool = await get_pool()
-    row = await pool.fetchrow(
-        "SELECT value FROM votes WHERE task_id = $1 AND user_id = $2",
-        task_id, user_id,
-    )
-    if row:
-        if row["value"] == -1:
-            await pool.execute("DELETE FROM votes WHERE task_id = $1 AND user_id = $2",
-                               task_id, user_id)
-            _cache.invalidate("feed")
-            return False
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow(
+            "SELECT value FROM votes WHERE task_id = $1 AND user_id = $2",
+            task_id, user_id,
+        )
+        if row:
+            if row["value"] == -1:
+                await conn.execute("DELETE FROM votes WHERE task_id = $1 AND user_id = $2",
+                                   task_id, user_id)
+                voted = False
+            else:
+                await conn.execute("UPDATE votes SET value = -1, created_at = $1 WHERE task_id = $2 AND user_id = $3",
+                                   ts, task_id, user_id)
+                voted = True
         else:
-            await pool.execute("UPDATE votes SET value = -1, created_at = $1 WHERE task_id = $2 AND user_id = $3",
-                               ts, task_id, user_id)
-            _cache.invalidate("feed")
-            return True
-    else:
-        await pool.execute("INSERT INTO votes (task_id, user_id, created_at, value) VALUES ($1, $2, $3, -1)",
-                           task_id, user_id, ts)
-        _cache.invalidate("feed")
-        return True
+            await conn.execute("INSERT INTO votes (task_id, user_id, created_at, value) VALUES ($1, $2, $3, -1)",
+                               task_id, user_id, ts)
+            voted = True
+        count = await conn.fetchval(
+            "SELECT COUNT(*) FROM votes WHERE task_id = $1 AND value = -1", task_id
+        )
+    _cache.invalidate("feed:")
+    _cache.invalidate("feed_tasks:")
+    _cache.delete(f"votes:{task_id}")
+    _cache.delete(f"has_voted:{task_id}:{user_id}")
+    return voted, count
 
 
 async def get_dislike_count(task_id: int) -> int:
@@ -957,6 +1013,7 @@ async def toggle_pin(task_id: int) -> bool:
         return False
     new_val = 0 if row["pinned"] else 1
     await pool.execute("UPDATE tasks SET pinned = $1 WHERE id = $2", new_val, task_id)
+    _cache.delete(f"task:{task_id}")
     return bool(new_val)
 
 
@@ -967,6 +1024,8 @@ async def archive_task(task_id: int):
     pool = await get_pool()
     await pool.execute("UPDATE tasks SET status = 'archived', updated_at = $1 WHERE id = $2",
                        ts, task_id)
+    _cache.delete(f"task:{task_id}")
+    _cache.delete("dashboard_stats")
 
 
 async def restore_task(task_id: int):
@@ -974,6 +1033,8 @@ async def restore_task(task_id: int):
     pool = await get_pool()
     await pool.execute("UPDATE tasks SET status = 'new', updated_at = $1 WHERE id = $2",
                        ts, task_id)
+    _cache.delete(f"task:{task_id}")
+    _cache.delete("dashboard_stats")
 
 
 async def get_archived_tasks(limit: int = 5, offset: int = 0) -> list[dict]:
@@ -997,6 +1058,7 @@ async def set_deadline(task_id: int, deadline: str | None):
     pool = await get_pool()
     await pool.execute("UPDATE tasks SET deadline = $1, updated_at = $2 WHERE id = $3",
                        deadline, ts, task_id)
+    _cache.delete(f"task:{task_id}")
 
 
 async def get_overdue_tasks() -> list[dict]:
@@ -1124,6 +1186,7 @@ async def update_task_description(task_id: int, new_description: str):
         "UPDATE tasks SET description = $1, updated_at = $2 WHERE id = $3",
         new_description, ts, task_id,
     )
+    _cache.delete(f"task:{task_id}")
 
 
 # ─── Admin Assignment ───
@@ -1135,6 +1198,7 @@ async def assign_task(task_id: int, admin_id: int | None, admin_name: str | None
         "UPDATE tasks SET assigned_admin_id = $1, assigned_admin_name = $2, updated_at = $3 WHERE id = $4",
         admin_id, admin_name, ts, task_id,
     )
+    _cache.delete(f"task:{task_id}")
 
 
 # ─── Tags ───
@@ -1420,6 +1484,9 @@ async def get_upcoming_deadlines(hours: int = 24) -> list[dict]:
 # ─── Dashboard stats ───
 
 async def get_dashboard_stats() -> dict:
+    cached = _cache.get("dashboard_stats")
+    if cached is not None:
+        return cached
     pool = await get_pool()
     day_ago = (now_msk() - timedelta(hours=24)).isoformat()
     now_iso = now_msk().isoformat()
@@ -1444,13 +1511,15 @@ async def get_dashboard_stats() -> dict:
             "WHERE t.status NOT IN ('done', 'archived') "
             "GROUP BY t.id ORDER BY votes DESC LIMIT 3"
         )
-        return {
+        result = {
             "new_24h": new_24h,
             "overdue": overdue,
             "total_open": total_open,
             "in_progress": in_progress,
             "top_voted": [_record_to_dict(r) for r in top_voted],
         }
+        _cache.set("dashboard_stats", result, ttl=60)
+        return result
 
 
 # ─── Bulk status update ───
@@ -1462,6 +1531,9 @@ async def bulk_update_status(task_ids: list[int], new_status: str):
         "UPDATE tasks SET status = $1, updated_at = $2 WHERE id = ANY($3::int[])",
         new_status, ts, task_ids,
     )
+    for tid in task_ids:
+        _cache.delete(f"task:{tid}")
+    _cache.delete("dashboard_stats")
 
 
 # ═══════════════════════════════════════════════
